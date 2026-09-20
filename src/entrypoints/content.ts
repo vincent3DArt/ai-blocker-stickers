@@ -1,6 +1,11 @@
+import { boot } from '@/content/index';
+
+// Registered at runtime per origin by the background script (document_start,
+// all frames). In development builds the fixtures origin is registered
+// automatically on install.
 export default defineContentScript({
-  matches: ['*://*.google.com/*'],
+  registration: 'runtime',
   main() {
-    console.log('Hello content.');
+    boot().catch((e) => console.error('[aibs] boot failed', e));
   },
 });

@@ -3,8 +3,31 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Default Popup Title</title>
+    <title>AI Blocker Stickers</title>
     <meta name="manifest.type" content="browser_action" />
+    <style>
+      :root { color-scheme: light dark; font: 13px/1.4 system-ui, sans-serif; }
+      body { margin: 0; width: 320px; padding: 12px; }
+      h1 { font-size: 14px; margin: 0 0 2px; }
+      .origin { font-family: ui-monospace, monospace; font-size: 11px; opacity: 0.7; margin-bottom: 10px; word-break: break-all; }
+      .muted { opacity: 0.7; }
+      .row { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
+      button { font: inherit; padding: 6px 10px; border-radius: 6px; border: 1px solid #8884; background: #8882; cursor: pointer; }
+      button:hover { background: #8883; }
+      button.primary { background: #2563eb; color: #fff; border-color: #2563eb; }
+      button.active { outline: 2px solid #2563eb; }
+      button.small { padding: 2px 6px; font-size: 11px; }
+      button.danger:hover { background: #b91c1c; color: #fff; }
+      ul.list { list-style: none; margin: 0 0 10px; padding: 0; max-height: 220px; overflow: auto; }
+      ul.list li { display: flex; align-items: center; gap: 6px; padding: 4px 0; border-bottom: 1px solid #8883; }
+      .name { flex: 1; }
+      .scope { font-family: ui-monospace, monospace; font-size: 10px; opacity: 0.7; max-width: 110px; flex: none; padding: 1px 2px; border: 1px solid #8884; border-radius: 3px; background: transparent; color: inherit; }
+      .dot { width: 8px; height: 8px; border-radius: 50%; background: #16a34a; flex: none; }
+      .dot.resolving { background: #9ca3af; }
+      .dot.lost { background: #d97706; }
+      .pause { display: block; margin: 6px 0; }
+      .hint { font-size: 11px; opacity: 0.7; margin: 8px 0 0; }
+    </style>
   </head>
   <body>
     <div id="app"></div>

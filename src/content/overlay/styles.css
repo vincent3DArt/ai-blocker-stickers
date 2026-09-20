@@ -1,0 +1,202 @@
+:host {
+  all: initial;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+#layer,
+#ui {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.piece {
+  position: absolute;
+  left: 0;
+  top: 0;
+  background: var(--aibs-color, #1f2937);
+  border-radius: 3px;
+  pointer-events: auto;
+  contain: strict;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+  color: rgba(255, 255, 255, 0.85);
+  font: 500 11px/1.2 system-ui, sans-serif;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  white-space: nowrap;
+  user-select: none;
+  cursor: default;
+}
+
+.piece.low::after {
+  content: '';
+  position: absolute;
+  right: 0;
+  top: 0;
+  border: 6px solid transparent;
+  border-right-color: #f59e0b;
+  border-top-color: #f59e0b;
+}
+
+.piece.lost {
+  background: repeating-linear-gradient(45deg, #b45309 0 6px, #92400e 6px 12px);
+  cursor: pointer;
+}
+
+.piece.peek {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.sticker.edit .piece {
+  outline: 2px solid #60a5fa;
+  outline-offset: -2px;
+  cursor: move;
+}
+
+.piece .label {
+  padding: 0 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.peek-card {
+  position: absolute;
+  left: 0;
+  top: 0;
+  background: #fff;
+  color: #111;
+  padding: 2px 4px;
+  border: 1px solid #f59e0b;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+  white-space: pre-wrap;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 2;
+}
+
+/* Edit-mode chrome */
+.toolbar {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  padding: 6px 8px;
+  background: #111827;
+  color: #f9fafb;
+  border-radius: 999px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+  font: 500 12px/1 system-ui, sans-serif;
+  pointer-events: auto;
+  z-index: 3;
+}
+
+.toolbar button {
+  all: unset;
+  padding: 6px 10px;
+  border-radius: 999px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.toolbar button:hover,
+.toolbar button.active {
+  background: #374151;
+}
+
+.toolbar button.primary {
+  background: #2563eb;
+}
+
+.toolbar .hint {
+  opacity: 0.7;
+  padding: 0 6px;
+}
+
+.capture {
+  position: absolute;
+  inset: 0;
+  pointer-events: auto;
+  cursor: crosshair;
+  z-index: 2;
+}
+
+.highlight {
+  position: absolute;
+  left: 0;
+  top: 0;
+  outline: 2px solid #2563eb;
+  outline-offset: 1px;
+  background: rgba(37, 99, 235, 0.12);
+  pointer-events: none;
+}
+
+.highlight .tag {
+  position: absolute;
+  left: 0;
+  top: -18px;
+  background: #2563eb;
+  color: #fff;
+  font: 500 11px/16px system-ui, sans-serif;
+  padding: 0 4px;
+  border-radius: 3px;
+  white-space: nowrap;
+}
+
+.drawbox {
+  position: absolute;
+  left: 0;
+  top: 0;
+  border: 2px dashed #2563eb;
+  background: rgba(37, 99, 235, 0.15);
+  pointer-events: none;
+}
+
+.chrome {
+  position: absolute;
+  left: 0;
+  top: 0;
+  display: flex;
+  gap: 2px;
+  pointer-events: auto;
+  z-index: 3;
+}
+
+.chrome button {
+  all: unset;
+  background: #111827;
+  color: #fff;
+  font: 500 11px/1 system-ui, sans-serif;
+  padding: 4px 6px;
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+.chrome button:hover {
+  background: #374151;
+}
+
+.chrome button.danger:hover {
+  background: #b91c1c;
+}
+
+.toast {
+  position: absolute;
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: #111827;
+  color: #f9fafb;
+  padding: 8px 12px;
+  border-radius: 6px;
+  font: 500 12px/1.3 system-ui, sans-serif;
+  pointer-events: none;
+  z-index: 4;
+}

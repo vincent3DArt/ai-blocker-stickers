@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Fixture: SPA</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 0; padding: 16px; }
+  nav a { margin-right: 12px; }
+  .field { margin: 8px 0; }
+  .label { display: inline-block; width: 120px; font-weight: 600; }
+</style>
+</head>
+<body>
+<nav>
+  <a href="/app/clients/123" data-link>Client 123</a>
+  <a href="/app/clients/456" data-link>Client 456</a>
+  <a href="/app/settings" data-link>Settings</a>
+</nav>
+<main id="view"></main>
+<script>
+  const CLIENTS = {
+    '123': { name: 'Jane Example', ssn: '123-45-6789', acct: '9876543210' },
+    '456': { name: 'John Sample', ssn: '987-65-4321', acct: '1234567890' },
+  };
+  function render() {
+    const m = location.pathname.match(/^\/app\/clients\/(\d+)$/);
+    const view = document.getElementById('view');
+    if (m && CLIENTS[m[1]]) {
+      const c = CLIENTS[m[1]];
+      view.innerHTML = `
+        <h1>Client ${m[1]}</h1>
+        <div class="field"><span class="label">Name</span><span id="client-name">${c.name}</span></div>
+        <div class="field"><span class="label">SSN</span><span id="client-ssn">${c.ssn}</span></div>
+        <div class="field"><span class="label">Account</span><span id="client-acct">${c.acct}</span></div>`;
+    } else if (location.pathname === '/app/settings') {
+      view.innerHTML = '<h1>Settings</h1><p>Nothing sensitive here.</p>';
+    } else {
+      view.innerHTML = '<h1>Home</h1>';
+    }
+  }
+  function go(path) { history.pushState({}, '', path); render(); }
+  document.addEventListener('click', (e) => {
+    const a = e.target.closest('a[data-link]');
+    if (a) { e.preventDefault(); go(a.getAttribute('href')); }
+  });
+  window.addEventListener('popstate', render);
+  window.__spa = { go };
+  render();
+</script>
+</body>
+</html>

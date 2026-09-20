@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Fixture: static client page</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 0; }
+  header.sticky { position: sticky; top: 0; background: #eef; padding: 12px 16px; border-bottom: 1px solid #99c; z-index: 5; }
+  main { padding: 16px; max-width: 900px; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { border: 1px solid #ccc; padding: 6px 10px; text-align: left; }
+  .scroller { height: 120px; overflow: auto; border: 1px solid #888; margin: 16px 0; }
+  .scroller .inner { height: 600px; padding: 8px; }
+  .narrow { width: 220px; }
+  .spacer { height: 1200px; background: repeating-linear-gradient(#fafafa 0 40px, #f0f0f0 40px 80px); }
+  dialog { padding: 20px; }
+</style>
+</head>
+<body>
+<header class="sticky">
+  Account on file: <span id="hdr-account" data-testid="header-account">9876543210</span>
+</header>
+<main>
+  <h1>Client: Jane Example</h1>
+  <p>Fixture page with fake identifiers. Nothing here is real.</p>
+
+  <h2>Identity</h2>
+  <table id="identity">
+    <thead><tr><th>Field</th><th>Value</th></tr></thead>
+    <tbody>
+      <tr><th scope="row">SSN</th><td id="ssn-cell">123-45-6789</td></tr>
+      <tr><th scope="row">EIN</th><td>12-3456789</td></tr>
+      <tr><th scope="row">Bank account</th><td class="acct">9876543210</td></tr>
+      <tr><th scope="row">Routing</th><td>021000021</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Notes</h2>
+  <p class="narrow">Taxpayer confirmed identity over the phone; spouse SSN is
+    <span id="wrapped-span">987-65-4321 and this inline span wraps across several lines in a narrow column</span>
+    which is what we want to test.</p>
+
+  <h2>Scrolling panel</h2>
+  <div class="scroller" id="scroller">
+    <div class="inner">
+      <p>Scroll me.</p>
+      <p style="margin-top:140px">Dependent SSN: <span id="dep-ssn">111-22-3333</span></p>
+      <p style="margin-top:300px">End of panel.</p>
+    </div>
+  </div>
+
+  <button id="open-modal" type="button">Open modal</button>
+  <dialog id="modal"><p>Modal content that would stack above a naive overlay.</p><button id="close-modal">Close</button></dialog>
+
+  <div class="spacer"></div>
+  <p>Bottom account: <span id="bottom-account">9876543210</span></p>
+</main>
+<script>
+  document.getElementById('open-modal').addEventListener('click', () => document.getElementById('modal').showModal());
+  document.getElementById('close-modal').addEventListener('click', () => document.getElementById('modal').close());
+</script>
+</body>
+</html>
