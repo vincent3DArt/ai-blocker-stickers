@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Fixture: layout shift matrix</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 0; padding: 16px; }
+  #controls { position: sticky; top: 0; background: #ffe; padding: 8px; border-bottom: 1px solid #cc9; z-index: 5; display: flex; flex-wrap: wrap; gap: 6px; }
+  table { border-collapse: collapse; width: 100%; margin-top: 12px; }
+  th, td { border: 1px solid #ccc; padding: 6px 10px; text-align: left; }
+  body.serif-font { font-family: Georgia, serif; font-size: 20px; }
+  body.cards table, body.cards thead, body.cards tbody, body.cards tr, body.cards th, body.cards td { display: block; }
+  body.cards thead { display: none; }
+  body.cards tr { border: 1px solid #999; margin: 8px 0; padding: 6px; }
+  body.cards td::before { content: attr(data-col) ": "; font-weight: bold; }
+  .scaled { transform: scale(0.8); transform-origin: top left; }
+  dialog { padding: 20px; }
+  #above { background: #fee; }
+</style>
+</head>
+<body>
+<div id="controls">
+  <button data-action="insert-above">Insert 300px above</button>
+  <button data-action="insert-row-above">Insert row above</button>
+  <button data-action="reorder-columns">Reorder columns</button>
+  <button data-action="swap-font">Swap font</button>
+  <button data-action="toggle-cards">Toggle cards layout</button>
+  <button data-action="rehash-classes">Re-render w/ new class hashes</button>
+  <button data-action="move-into-modal">Move cell into modal</button>
+  <button data-action="hide-toggle">Hide / show table</button>
+  <button data-action="scale">Scale container</button>
+  <button data-action="delete-row">Delete target row</button>
+  <button data-action="reset">Reset</button>
+</div>
+<div id="above"></div>
+<h1>Clients</h1>
+<div id="table-host">
+  <table id="clients">
+    <thead><tr><th>Name</th><th>SSN</th><th>Account</th></tr></thead>
+    <tbody id="rows"></tbody>
+  </table>
+</div>
+<dialog id="modal"><div id="modal-slot"></div><button id="close-modal" type="button">Close</button></dialog>
+<script>
+  const DATA = [
+    { name: 'Alice Example', ssn: '111-22-3333', acct: '1000000001' },
+    { name: 'Bob Example',   ssn: '123-45-6789', acct: '9876543210' }, // target row (index 1)
+    { name: 'Cara Example',  ssn: '444-55-6666', acct: '1000000003' },
+  ];
+  const state = { order: ['name', 'ssn', 'acct'], hash: 'a1b2c', rows: DATA.map((d) => ({ ...d })) };
+  const LABELS = { name: 'Name', ssn: 'SSN', acct: 'Account' };
+
+  function render() {
+    const head = document.querySelector('#clients thead tr');
+    head.innerHTML = state.order.map((k) => `<th>${LABELS[k]}</th>`).join('');
+    const tbody = document.getElementById('rows');
+    tbody.innerHTML = state.rows
+      .map(
+        (r, i) =>
+          `<tr class="row-${state.hash} css-${state.hash}${i}" data-key="${r.acct}">` +
+          state.order.map((k) => `<td class="cell-${state.hash} col-${k}" data-col="${LABELS[k]}">${r[k]}</td>`).join('') +
+          '</tr>',
+      )
+      .join('');
+  }
+
+  const actions = {
+    'insert-above': () => { const d = document.getElementById('above'); d.style.height = (parseInt(d.style.height || '0') + 300) + 'px'; },
+    'insert-row-above': () => { state.rows.splice(0, 0, { name: 'New Person', ssn: '000-00-0000', acct: '1000000009' }); render(); },
+    'reorder-columns': () => { state.order.reverse(); render(); },
+    'swap-font': () => document.body.classList.toggle('serif-font'),
+    'toggle-cards': () => document.body.classList.toggle('cards'),
+    'rehash-classes': () => { state.hash = Math.random().toString(36).slice(2, 7); render(); },
+    'move-into-modal': () => {
+      const cell = document.querySelector('#rows tr[data-key="9876543210"] td.col-ssn');
+      const modal = document.getElementById('modal');
+      if (cell) { document.getElementById('modal-slot').appendChild(cell); modal.showModal(); }
+    },
+    'hide-toggle': () => { const t = document.getElementById('table-host'); t.style.display = t.style.display === 'none' ? '' : 'none'; },
+    'scale': () => document.getElementById('table-host').classList.toggle('scaled'),
+    'delete-row': () => { state.rows = state.rows.filter((r) => r.acct !== '9876543210'); render(); },
+    'reset': () => { location.reload(); },
+  };
+
+  document.getElementById('controls').addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-action]');
+    if (b) actions[b.dataset.action]();
+  });
+  document.getElementById('close-modal').addEventListener('click', () => document.getElementById('modal').close());
+  window.__fx = { run: (name) => actions[name](), state };
+  render();
+</script>
+</body>
+</html>

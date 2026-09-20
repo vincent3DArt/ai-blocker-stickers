@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Fixture: forms</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 0; padding: 16px; }
+  .field { margin: 10px 0; }
+  label { display: inline-block; width: 140px; }
+  input, textarea { font: inherit; padding: 4px 6px; }
+  [contenteditable] { border: 1px solid #999; padding: 6px; min-height: 40px; width: 400px; }
+  img { display: block; margin-top: 10px; }
+</style>
+</head>
+<body>
+<h1>Intake form</h1>
+<form id="intake">
+  <div class="field"><label for="ssn">SSN</label><input id="ssn" name="ssn" value="123-45-6789" title="Social security number"></div>
+  <div class="field"><label for="acct">Account number</label><input id="acct" name="acct" value="9876543210"></div>
+  <div class="field"><label for="notes">Notes</label><textarea id="notes" name="notes">Spouse SSN 987-65-4321</textarea></div>
+  <div class="field"><label>Editor</label><div id="editor" contenteditable="true">Dependent SSN 111-22-3333 typed in an editor.</div></div>
+  <button type="submit">Submit</button>
+</form>
+<div id="react-ish">
+  <p>Live value: <span id="live">123-45-6789</span></p>
+</div>
+<img id="photo" alt="Scan of SSN card 123-45-6789" width="200" height="120" src="data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='120'%3E%3Crect width='200' height='120' fill='%23e5e7eb'/%3E%3Ctext x='10' y='65' font-size='20'%3E123-45-6789%3C/text%3E%3C/svg%3E">
+<script>
+  // Simulates a framework re-render: rewrites the text node every 300ms with the raw value.
+  const live = document.getElementById('live');
+  let n = 0;
+  window.__ticks = 0;
+  setInterval(() => {
+    n++;
+    window.__ticks = n;
+    if (n % 2) live.textContent = '123-45-6789';
+    else { live.replaceChildren(document.createTextNode('123-45-6789')); }
+  }, 300);
+  document.getElementById('intake').addEventListener('submit', (e) => {
+    e.preventDefault();
+    window.__submitted = Object.fromEntries(new FormData(e.target).entries());
+  });
+</script>
+</body>
+</html>
