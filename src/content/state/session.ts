@@ -53,6 +53,9 @@ export interface SessionOptions {
 const LOST_AFTER_MS = 30_000;
 const LOST_AFTER_LOAD_MS = 5_000;
 const DETACH_GRACE_MS = 5_000;
+/** How often the visibility-independent masking retry runs, and for how long. */
+const MASK_RETRY_MS = 500;
+const MASK_RETRY_WINDOW_MS = 30_000;
 
 export class Session {
   private runtimes = new Map<string, Runtime>();
@@ -61,11 +64,14 @@ export class Session {
   private loadedAt = Date.now();
   private resolving = false;
   private resolveAgain = false;
+  private maskTimer = 0;
+  private maskRetryUntil = 0;
 
   private disposers: Array<() => void> = [];
 
   constructor(private o: SessionOptions) {
     this.watchSettling();
+    this.watchVisibility();
   }
 
   /**
@@ -77,10 +83,17 @@ export class Session {
    * under the rect afterwards without necessarily moving the rect itself, so
    * the cached `lastRectKey` would otherwise suppress the only scan that would
    * notice. Every milestone simply forgets the cached key.
+   *
+   * The re-scan runs synchronously here rather than through
+   * `positioner.markDirty()` (a requestAnimationFrame): frames never arrive in
+   * a background tab, and masking must not wait for one. `markDirty` is still
+   * called, but only so the overlay pieces get repainted whenever painting is
+   * possible.
    */
   private watchSettling() {
     const again = () => {
       for (const rt of this.runtimes.values()) if (rt.sticker.kind === 'rect') rt.lastRectKey = '';
+      this.maskRects();
       this.o.positioner.markDirty();
     };
     let live = true;
@@ -100,6 +113,92 @@ export class Session {
     }
   }
 
+  /**
+   * Masking already ran while the tab was hidden; the overlay could not be
+   * painted, because `Positioner` schedules through requestAnimationFrame and
+   * skips its slow tick while `document.hidden`. Flush once the tab is shown so
+   * the pieces catch up with the text they cover.
+   */
+  private watchVisibility() {
+    const onVis = () => {
+      if (document.hidden) return;
+      this.o.positioner.flush();
+    };
+    document.addEventListener('visibilitychange', onVis);
+    this.disposers.push(() => document.removeEventListener('visibilitychange', onVis));
+  }
+
+  /**
+   * Mask under every rect sticker right now, without a frame, a paint or a
+   * visibility check.
+   *
+   * This is the "mask" half of the mask/paint split: it only rewrites text and
+   * only needs layout (`getBoundingClientRect` / `Range.getClientRects`), both
+   * of which keep working in a background tab. Painting the overlay pieces
+   * stays in `recompute()`, which may keep skipping while hidden.
+   */
+  maskRects() {
+    if (this.paused) return;
+    for (const rt of this.runtimes.values()) {
+      if (rt.sticker.kind !== 'rect') continue;
+      if (rt.status !== 'resolved' || !rt.el?.isConnected) continue;
+      this.maskRect(rt);
+    }
+  }
+
+  private maskRect(rt: Runtime) {
+    const el = rt.el;
+    if (!el || rt.sticker.kind !== 'rect' || !isRendered(el)) return;
+    const box = toViewRect(el.getBoundingClientRect());
+    const p = projectRect(rt.sticker, box);
+    rt.lastRect = p.rect;
+    this.maskUnderRect(rt, el, p.rect);
+  }
+
+  /** True while some rect sticker that wants text masked has none applied. */
+  private maskPending(): boolean {
+    if (this.paused) return false;
+    for (const rt of this.runtimes.values()) {
+      const s = rt.sticker;
+      if (s.kind !== 'rect' || !s.maskUnderlyingText) continue;
+      if (!this.o.masker.has(s.id)) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Keep retrying the rect scan on a plain timer.
+   *
+   * `coveredTextRanges` can legitimately come up empty right after the
+   * container resolves — the box is not final, fonts have not swapped, the text
+   * has not reflowed yet — and the events that would normally notice
+   * (rAF, the slow tick) never fire in a background tab. A `setInterval` does,
+   * so it is the one signal that works everywhere. It stops as soon as every
+   * rect sticker holds a mask, or after `MASK_RETRY_WINDOW_MS`; each mutation
+   * batch restarts the window.
+   */
+  private armMaskRetry() {
+    this.maskRetryUntil = Date.now() + MASK_RETRY_WINDOW_MS;
+    if (this.maskTimer || !this.maskPending()) return;
+    this.maskTimer = window.setInterval(() => {
+      if (Date.now() > this.maskRetryUntil || !this.maskPending()) {
+        this.stopMaskRetry();
+        return;
+      }
+      // Forget the cached rect key: the whole point of a retry is to re-scan a
+      // rectangle that has not moved but whose text may finally have settled.
+      for (const rt of this.runtimes.values()) if (rt.sticker.kind === 'rect') rt.lastRectKey = '';
+      this.maskRects();
+      if (!this.maskPending()) this.stopMaskRetry();
+    }, MASK_RETRY_MS);
+  }
+
+  private stopMaskRetry() {
+    if (!this.maskTimer) return;
+    clearInterval(this.maskTimer);
+    this.maskTimer = 0;
+  }
+
   /** Apply every sticker that matches the current path. */
   async load() {
     this.loadedAt = Date.now();
@@ -111,6 +210,8 @@ export class Session {
     // re-armed by the parser's mutation batches, and boot must not wait for
     // that to settle before it can answer messages.
     void this.resolveAll();
+    this.maskRects();
+    this.armMaskRetry();
     this.o.positioner.flush();
     this.reportState();
   }
@@ -131,6 +232,10 @@ export class Session {
    */
   async onMutationBatch() {
     await this.resolveAll();
+    // Masking runs here, on a setTimeout-driven batch, rather than waiting for
+    // the frame `resolveAll` asks for: batches still fire in a hidden tab.
+    this.maskRects();
+    this.armMaskRetry();
   }
 
   get isPaused() {
@@ -147,6 +252,8 @@ export class Session {
         this.applyMask(rt);
       }
     }
+    if (paused) this.stopMaskRetry();
+    else this.armMaskRetry();
     this.o.positioner.flush();
     this.reportState();
   }
@@ -342,6 +449,7 @@ export class Session {
   }
 
   destroy() {
+    this.stopMaskRetry();
     for (const id of Array.from(this.runtimes.keys())) this.drop(id);
     this.disposers.forEach((d) => d());
     this.disposers = [];
@@ -420,8 +528,12 @@ export class Session {
     if (s.kind === 'element') {
       this.o.masker.apply(s.id, rt.el, s.maskMode);
     } else {
-      // Rect stickers mask text lazily from position(), once the rect is known.
+      // Rect stickers mask whatever their projected rectangle covers. Do it now
+      // and synchronously: `attach` is the earliest moment the container is
+      // known, and nothing that follows (rAF, the slow tick) is guaranteed to
+      // run in a background tab. Retries are handled by the mask timer.
       rt.lastRectKey = '';
+      this.maskRect(rt);
     }
   }
 

@@ -385,6 +385,90 @@ test.describe('M3 DOM masking', () => {
     expect(coverage(sub2, after.pieces)).toBeGreaterThanOrEqual(0.8);
   });
 
+  /**
+   * An AI browser agent drives tabs it never brings to the front: the tab is
+   * hidden, `requestAnimationFrame` never fires and `document.hasFocus()` is
+   * false, yet the agent reads the DOM there. Masking must therefore never be
+   * scheduled through a frame, a paint, or the slow tick's `document.hidden`
+   * guard.
+   *
+   * Playwright cannot produce that tab: every page it drives reports
+   * `visibilityState === 'visible'` and keeps getting animation frames however
+   * the tabs are stacked (verified for headless and headed Edge, with focus
+   * emulation off and the window minimised). An init script is no help either —
+   * it runs in the page's world, while the content script runs in the
+   * extension's isolated one, so overwriting `window.requestAnimationFrame`
+   * there is invisible to the code under test.
+   *
+   * So the tab really is parked behind another page and really is unfocused,
+   * and on top of that the extension is told (dev-only `aibsEmulateHidden`, read
+   * at boot) to take away from its own world exactly what a background tab
+   * takes away: animation frames and a visible `document`. The probe below
+   * asserts, from inside that world, that both are really gone — if the
+   * emulation ever stopped applying, this test would stop being a hidden-tab
+   * test loudly rather than silently.
+   */
+  test('masks in a background tab without animation frames', async ({ page, ext }) => {
+    await page.goto('/static.html');
+    const sub = await substringRect(page, '#wrapped-span', '987-65-4321');
+    expect((await ext.rect(page, sub)).kind).toBe('rect');
+    await ext.cover(page, '#ssn-cell');
+    const before = await pageText(page);
+    expect(before.innerText).not.toContain('987-65-4321');
+    expect(before.innerText).not.toContain('123-45-6789');
+
+    await ext.worker.evaluate(() => chrome.storage.local.set({ aibsEmulateHidden: true }));
+    // Playwright pretends every page is focused; turn that off for page A.
+    const cdp = await ext.context.newCDPSession(page);
+    await cdp.send('Emulation.setFocusEmulationEnabled', { enabled: false });
+
+    // Park page A behind another tab. From here on we only talk to A through
+    // page.evaluate: ext.send()/ext.state() would bring it to the front.
+    const other = await ext.context.newPage();
+    await other.goto('/forms.html');
+    await other.bringToFront();
+    expect(await page.evaluate(() => document.hasFocus())).toBe(false);
+
+    await page.reload();
+    await expect
+      .poll(async () => page.evaluate(() => document.readyState), { timeout: 10_000 })
+      .toBe('complete');
+    await page.waitForTimeout(1500);
+
+    // Inside the extension's world: no frames, hidden document.
+    const probe = await ext.worker.evaluate(async () => {
+      const [tab] = await chrome.tabs.query({ url: '*://*/static.html' });
+      const [res] = await chrome.scripting.executeScript({
+        target: { tabId: tab.id!, frameIds: [0] },
+        world: 'ISOLATED',
+        func: () =>
+          new Promise<{ raf: boolean; hidden: boolean }>((r) => {
+            let ran = false;
+            requestAnimationFrame(() => (ran = true));
+            setTimeout(() => r({ raf: ran, hidden: document.hidden }), 700);
+          }),
+      });
+      return res.result as { raf: boolean; hidden: boolean };
+    });
+    expect(probe.raf).toBe(false);
+    expect(probe.hidden).toBe(true);
+
+    const t = await pageText(page);
+    expect(t.innerText).not.toContain('987-65-4321');
+    expect(t.textContent).not.toContain('987-65-4321');
+    const span = (await page.textContent('#wrapped-span')) ?? '';
+    expect(span).toContain('•'.repeat(11));
+    expect(span).not.toContain('•'.repeat(12));
+    // The element sticker masked in the same hidden window.
+    expect(await page.textContent('#ssn-cell')).toBe('•'.repeat('123-45-6789'.length));
+    // The rest of the page is untouched.
+    expect(t.innerText).toContain('and this inline span wraps');
+    expect(t.innerText).toContain('spouse SSN is');
+
+    await ext.worker.evaluate(() => chrome.storage.local.remove('aibsEmulateHidden'));
+    await other.close();
+  });
+
   test('no secret is stored in extension storage', async ({ page, ext }) => {
     await page.goto('/static.html');
     await ext.cover(page, '#ssn-cell');
