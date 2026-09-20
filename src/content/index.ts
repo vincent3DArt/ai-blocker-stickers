@@ -33,10 +33,35 @@ function frameDepth(): number {
   return d;
 }
 
+/**
+ * Dev-only: make our own world look like a background tab.
+ *
+ * A tab an AI agent drives without fronting it has no animation frames and a
+ * hidden `document`, and that is the environment masking must survive. It
+ * cannot be produced under Playwright — every page it drives stays `visible`
+ * and keeps getting frames, whichever tab is in front — and an init script
+ * cannot help either, because it runs in the page's world while our code runs
+ * in the extension's isolated one.
+ *
+ * So the e2e suite sets `aibsEmulateHidden` in extension storage and we take
+ * away here, in our world only and before anything starts, exactly what a real
+ * background tab takes away. The page's own world is untouched.
+ */
+async function emulateHiddenTab() {
+  const got = await chrome.storage.local.get('aibsEmulateHidden').catch(() => ({}) as Record<string, unknown>);
+  if (!got.aibsEmulateHidden) return;
+  window.requestAnimationFrame = () => 0;
+  window.cancelAnimationFrame = () => {};
+  Object.defineProperty(Document.prototype, 'hidden', { configurable: true, get: () => true });
+  Object.defineProperty(Document.prototype, 'visibilityState', { configurable: true, get: () => 'hidden' });
+  console.debug('[aibs] emulating a hidden tab (dev only)');
+}
+
 export async function boot() {
   if (window.__aibsBooted) return;
   window.__aibsBooted = true;
   if (!location.origin || location.origin === 'null') return;
+  if (import.meta.env.DEV) await emulateHiddenTab();
 
   // Register the message listener before any await so messages that arrive
   // during boot are answered once boot completes instead of being dropped.
