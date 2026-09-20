@@ -62,7 +62,43 @@ export class Session {
   private resolving = false;
   private resolveAgain = false;
 
-  constructor(private o: SessionOptions) {}
+  private disposers: Array<() => void> = [];
+
+  constructor(private o: SessionOptions) {
+    this.watchSettling();
+  }
+
+  /**
+   * Layout milestones after which a rect's text scan must run again.
+   *
+   * A rect sticker masks whatever its projected rectangle covers, and at
+   * document_start that rectangle is projected from a container whose box is
+   * not final and measured against text laid out in a fallback font. Both move
+   * under the rect afterwards without necessarily moving the rect itself, so
+   * the cached `lastRectKey` would otherwise suppress the only scan that would
+   * notice. Every milestone simply forgets the cached key.
+   */
+  private watchSettling() {
+    const again = () => {
+      for (const rt of this.runtimes.values()) if (rt.sticker.kind === 'rect') rt.lastRectKey = '';
+      this.o.positioner.markDirty();
+    };
+    let live = true;
+    this.disposers.push(() => (live = false));
+    document.fonts?.ready.then(() => live && again()).catch(() => {});
+    const onLoad = () => again();
+    window.addEventListener('load', onLoad);
+    this.disposers.push(() => window.removeEventListener('load', onLoad));
+    if (document.readyState !== 'complete') {
+      const onReady = () => {
+        if (document.readyState !== 'complete') return;
+        document.removeEventListener('readystatechange', onReady);
+        again();
+      };
+      document.addEventListener('readystatechange', onReady);
+      this.disposers.push(() => document.removeEventListener('readystatechange', onReady));
+    }
+  }
 
   /** Apply every sticker that matches the current path. */
   async load() {
@@ -182,6 +218,7 @@ export class Session {
       createdAt: now,
       updatedAt: now,
       container: a.container,
+      containerKind: a.containerKind,
       frac: a.frac,
       px: a.px,
       maskUnderlyingText: true,
@@ -306,6 +343,8 @@ export class Session {
 
   destroy() {
     for (const id of Array.from(this.runtimes.keys())) this.drop(id);
+    this.disposers.forEach((d) => d());
+    this.disposers = [];
   }
 
   // ---- internals ----
@@ -453,9 +492,13 @@ export class Session {
     if (!s.maskUnderlyingText) return;
     const key = `${Math.round(rect.x + scrollX)}:${Math.round(rect.y + scrollY)}:${Math.round(rect.w)}:${Math.round(rect.h)}`;
     // Re-scan when the rect moved, when the masker says the page disturbed our
-    // split, or while nothing is masked at all: in that last case the text can
-    // still slide under a rect whose own projection never changes (a rect over
-    // a scroll container), and the scan is the only thing that would notice.
+    // split, or while nothing is masked at all. That last case is the retry
+    // loop: the text can slide under a rect whose own projection never changes
+    // (a rect over a scroll container, or prose re-flowing as fonts arrive),
+    // and the scan is the only thing that would notice. `masker.has` is false
+    // whenever the masker holds no split for this id, including when the scan
+    // found ranges but every node was already cut up by another sticker, so
+    // this keeps retrying until something is really masked or the sticker goes.
     if (key === rt.lastRectKey && this.o.masker.has(s.id) && !this.o.masker.isStale(s.id)) return;
     rt.lastRectKey = key;
     // Measure the page's own text: put anything we masked back first, so the

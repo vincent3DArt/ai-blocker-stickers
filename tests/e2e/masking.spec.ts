@@ -259,6 +259,103 @@ test.describe('M3 DOM masking', () => {
     expect(t.innerText).toContain('and this inline span wraps');
   });
 
+  test('a tight rect over prose survives reload', async ({ page, ext }) => {
+    await page.goto('/static.html');
+    const sub = await substringRect(page, '#wrapped-span', '987-65-4321');
+    const made = await ext.rect(page, sub);
+    expect(made.kind).toBe('rect');
+    const before = await pageText(page);
+    expect(before.innerText).not.toContain('987-65-4321');
+    expect(await page.textContent('#wrapped-span')).toContain('•'.repeat(11));
+
+    await page.reload();
+    await expect
+      .poll(async () => (await ext.state(page)).stickers[0]?.status, { timeout: 10_000 })
+      .toBe('resolved');
+    // Give fonts/layout and every retry path a generous window to settle.
+    await page.waitForTimeout(1000);
+
+    const after = await ext.state(page);
+    const t = await pageText(page);
+    expect(t.innerText).not.toContain('987-65-4321');
+    expect(t.textContent).not.toContain('987-65-4321');
+    const span = (await page.textContent('#wrapped-span')) ?? '';
+    expect(span).toContain('•'.repeat(11));
+    expect(span).not.toContain('•'.repeat(12));
+    // The rest of the sentence is still readable.
+    expect(t.innerText).toContain('and this inline span wraps');
+    expect(t.innerText).toContain('spouse SSN is');
+    // The overlay still sits on the masked number.
+    const run = await page.evaluate(() => {
+      const el = document.getElementById('wrapped-span')!;
+      const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+      let n: Node | null;
+      while ((n = walker.nextNode())) {
+        const d = (n as Text).data;
+        const i = d.indexOf('•');
+        if (i < 0) continue;
+        let j = i;
+        while (j < d.length && d[j] === '•') j++;
+        const r = document.createRange();
+        r.setStart(n, i);
+        r.setEnd(n, j);
+        const b = r.getBoundingClientRect();
+        return { x: b.left, y: b.top, w: b.width, h: b.height };
+      }
+      throw new Error('no bullet run in #wrapped-span');
+    });
+    expect(coverage(run, after.pieces)).toBeGreaterThanOrEqual(0.8);
+    expect(after.pieces[0].low).toBe(false);
+  });
+
+  /**
+   * Same sticker, but the document stops parsing half way through the reload,
+   * so the extension resolves and positions while the page is still loading.
+   * A rect anchored to a page-level wrapper (`main`, `body`) projects from a
+   * box that is nowhere near its final height at that moment and masks
+   * whatever text happens to sit under the misplaced rectangle; anchored to the
+   * paragraph it covers, it lands on the number straight away.
+   */
+  test('a tight rect over prose masks the right text before the document finishes loading', async ({ page, ext }) => {
+    await page.goto('/static.html');
+    const sub = await substringRect(page, '#wrapped-span', '987-65-4321');
+    expect((await ext.rect(page, sub)).kind).toBe('rect');
+    expect((await pageText(page)).innerText).not.toContain('987-65-4321');
+
+    // A parser-blocking script that never answers until we let it: everything
+    // after it (the scroll panel, the 1200px spacer) is not laid out yet.
+    await page.route('**/stall.js', async (route) => {
+      await new Promise((r) => setTimeout(r, 4000));
+      await route.fulfill({ status: 200, headers: { 'content-type': 'text/javascript' }, body: '/* */' });
+    });
+    await page.route('**/static.html', async (route) => {
+      const body = await (await route.fetch()).text();
+      await route.fulfill({
+        status: 200,
+        headers: { 'content-type': 'text/html; charset=utf-8' },
+        body: body.replace('<h2>Scrolling panel</h2>', '<script src="/stall.js"></script><h2>Scrolling panel</h2>'),
+      });
+    });
+
+    await page.reload({ waitUntil: 'commit' });
+    await expect
+      .poll(async () => (await ext.state(page)).stickers[0]?.status, { timeout: 10_000 })
+      .toBe('resolved');
+    await page.waitForTimeout(1000);
+    // Still parsing: this is the window the regression lived in.
+    expect(await page.evaluate(() => document.readyState)).not.toBe('complete');
+
+    const t = await pageText(page);
+    expect(t.innerText).not.toContain('987-65-4321');
+    const span = (await page.textContent('#wrapped-span')) ?? '';
+    expect(span).toContain('•'.repeat(11));
+    expect(span).not.toContain('•'.repeat(12));
+    expect(t.innerText).toContain('and this inline span wraps');
+    // Nothing else on the page was masked by mistake.
+    expect(t.innerText).toContain('Identity');
+    expect(t.innerText).toContain('Taxpayer confirmed identity over the phone');
+  });
+
   test('a rect inside a nested scroll container survives reload', async ({ page, ext }) => {
     await page.goto('/static.html');
     const scroll = () => page.evaluate(() => { document.getElementById('scroller')!.scrollTop = 140; });

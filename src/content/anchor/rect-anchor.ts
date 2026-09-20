@@ -1,4 +1,4 @@
-import type { Confidence, Fingerprint, RectFraction, ViewRect } from '@/shared/types';
+import type { Confidence, Fingerprint, RectContainerKind, RectFraction, ViewRect } from '@/shared/types';
 import { contains, toViewRect } from './geometry';
 import { buildFingerprint } from './fingerprint';
 
@@ -6,6 +6,35 @@ export interface RectAnchor {
   container: Fingerprint;
   frac: RectFraction;
   px: { w: number; h: number };
+  containerKind: RectContainerKind;
+}
+
+const BLOCKISH = /^(block|flow-root|list-item|table|table-cell|table-caption|grid|flex)$/;
+
+/**
+ * Nearest block-level ancestor-or-self of whatever is under `rect`.
+ *
+ * This is the container we *want* for a rect drawn over prose: a paragraph's
+ * box is settled as soon as its own line boxes are, whereas the deepest element
+ * that happens to contain the rect is often a page-level wrapper (`main`,
+ * `body`) whose height keeps changing while the document loads. Fractions taken
+ * against such a wrapper project to a different place at load time than they
+ * did at draw time, which is how a tight rect drifts off its own text.
+ *
+ * Inline elements are skipped: an inline span's border box is the union of its
+ * line boxes, which moves whenever the text re-wraps (including when we mask
+ * it).
+ */
+function blockUnder(rect: ViewRect, skip: (el: Element) => boolean): Element | null {
+  const cx = rect.x + rect.w / 2;
+  const cy = rect.y + rect.h / 2;
+  const hit = document.elementsFromPoint(cx, cy).find((e) => !skip(e));
+  let el: Element | null = hit ?? null;
+  while (el && el !== document.body && el !== document.documentElement) {
+    if (BLOCKISH.test(getComputedStyle(el).display)) return el;
+    el = el.parentElement;
+  }
+  return null;
 }
 
 /**
@@ -35,8 +64,29 @@ export function containerFor(rect: ViewRect, skip: (el: Element) => boolean): El
   return document.body ?? document.documentElement;
 }
 
+/**
+ * Container for `rect`, preferring the nearest block ancestor of the text it
+ * covers over the deepest element that merely contains it. The block is only
+ * taken when it still contains the rect and sits inside the containing
+ * element, so a rect spanning several siblings keeps their common parent.
+ */
+export function chooseContainer(
+  rect: ViewRect,
+  skip: (el: Element) => boolean,
+): { el: Element; kind: RectContainerKind } {
+  const hit = containerFor(rect, skip);
+  const block = blockUnder(rect, skip);
+  if (block && block !== hit && hit.contains(block)) {
+    const box = toViewRect(block.getBoundingClientRect());
+    // 2px of slack: a tight rect is usually drawn a pixel outside the glyphs.
+    const padded = { x: box.x - 2, y: box.y - 2, w: box.w + 4, h: box.h + 4 };
+    if (box.w > 0 && box.h > 0 && contains(padded, rect)) return { el: block, kind: 'block' };
+  }
+  return { el: hit, kind: 'hit' };
+}
+
 export async function anchorRect(rect: ViewRect, skip: (el: Element) => boolean): Promise<RectAnchor> {
-  const container = containerFor(rect, skip);
+  const { el: container, kind } = chooseContainer(rect, skip);
   const box = toViewRect(container.getBoundingClientRect());
   const frac: RectFraction = {
     fx: box.w > 0 ? (rect.x - box.x) / box.w : 0,
@@ -44,7 +94,7 @@ export async function anchorRect(rect: ViewRect, skip: (el: Element) => boolean)
     fw: box.w > 0 ? rect.w / box.w : 0,
     fh: box.h > 0 ? rect.h / box.h : 0,
   };
-  return { container: await buildFingerprint(container), frac, px: { w: rect.w, h: rect.h } };
+  return { container: await buildFingerprint(container), frac, px: { w: rect.w, h: rect.h }, containerKind: kind };
 }
 
 /**
@@ -52,7 +102,7 @@ export async function anchorRect(rect: ViewRect, skip: (el: Element) => boolean)
  * drifted (responsive reflow) the pixel size is kept and only the origin is
  * taken from the fractions, flagged as low confidence.
  */
-export function projectRect(anchor: RectAnchor, containerBox: ViewRect): { rect: ViewRect; confidence: Confidence } {
+export function projectRect(anchor: Omit<RectAnchor, 'container' | 'containerKind'>, containerBox: ViewRect): { rect: ViewRect; confidence: Confidence } {
   const { frac, px } = anchor;
   const storedAspect = px.h > 0 ? px.w / px.h : 1;
   const nowW = containerBox.w * frac.fw;

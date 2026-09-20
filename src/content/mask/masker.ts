@@ -97,8 +97,15 @@ export class Masker {
     this.disposers = [];
   }
 
+  /**
+   * True when this id currently holds a mask. A record only exists while it
+   * actually rewrote something: `applyTextRanges` drops a record that produced
+   * no splits, so callers can use this to decide whether to keep retrying.
+   */
   has(id: string): boolean {
-    return this.records.has(id);
+    const rec = this.records.get(id);
+    if (!rec) return false;
+    return rec.subset ? rec.splits.length > 0 : true;
   }
 
   /** Mask a whole element. */
@@ -165,6 +172,16 @@ export class Masker {
       this.splitOwner.set(node, { rec, split });
       for (const p of split.parts) this.splitOwner.set(p, { rec, split });
       for (const m of middles) this.maskText(rec, m);
+    }
+    if (rec.splits.length === 0) {
+      // Nothing was actually masked: every covered node was already cut up by
+      // another sticker, or the ranges collapsed. Leaving the record behind
+      // would make `has(id)` report a mask that does not exist, and the caller's
+      // "already masked, skip the scan" guard would then never rescan — the
+      // sticker would sit over readable text forever. Drop it so the next tick
+      // tries again.
+      this.records.delete(id);
+      return;
     }
     if (import.meta.env.DEV) {
       const after = root.textContent ?? '';

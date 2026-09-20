@@ -126,10 +126,21 @@ export interface RectFraction {
   fh: number;
 }
 
+/**
+ * How `RectSticker.container` was picked. `block` is the nearest block-level
+ * ancestor of the text under the rectangle (a paragraph, a table cell): its box
+ * is settled as soon as its own lines are, so the fractions project to the same
+ * place on reload. `hit` is the legacy fallback — the deepest element that
+ * fully contained the rectangle, which on prose is often a page-level wrapper.
+ */
+export type RectContainerKind = 'block' | 'hit';
+
 export interface RectSticker extends StickerBase {
   kind: 'rect';
-  /** The deepest element that fully contained the rectangle at draw time. */
+  /** The element the fractions are relative to; see `containerKind`. */
   container: Fingerprint;
+  /** Which rule chose `container`. Absent on stickers stored before this existed. */
+  containerKind?: RectContainerKind;
   /** Rectangle as fractions of the container's box. */
   frac: RectFraction;
   /** Absolute size at draw time, used when the container's aspect ratio drifts. */
