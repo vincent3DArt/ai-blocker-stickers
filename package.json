@@ -1,0 +1,27 @@
+{
+  "name": "ai-blocker-stickers",
+  "description": "Opaque, content-anchored stickers that hide sensitive page regions from AI agents (screenshots and page readers).",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "wxt",
+    "build": "wxt build",
+    "zip": "wxt zip",
+    "compile": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "e2e": "playwright test",
+    "fixtures": "vite preview --outDir fixtures --port 4173 --strictPort",
+    "postinstall": "wxt prepare"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.50.0",
+    "@types/chrome": "^0.0.300",
+    "jsdom": "^26.0.0",
+    "typescript": "^5.9.3",
+    "vite": "^8.1.5",
+    "vitest": "^3.0.0",
+    "wxt": "^0.21.3"
+  }
+}
