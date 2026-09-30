@@ -18,6 +18,11 @@ export interface PeekCallbacks {
   /** All visible stickers. */
   all(): PeekTarget[];
   onPeek(ids: string[], on: boolean): void;
+  /**
+   * True while the AI-session lock is on. CDP-driven agents send trusted
+   * input, so while one may be driving the page nothing is revealed at all.
+   */
+  locked(): boolean;
 }
 
 /**
@@ -51,7 +56,7 @@ export class Peek {
       // told apart here: see docs/LIMITATIONS.md. Releases stay untrusted-ok:
       // ending a peek early is always safe.
       if (!e.isTrusted) return;
-      if (this.mode) return;
+      if (this.mode || this.cb.locked()) return;
       const s = this.settings().peek;
       if (comboMatches(s.all, e)) this.arm('all', e);
       else if (comboMatches(s.single, e)) this.arm('single', e);
@@ -82,6 +87,10 @@ export class Peek {
   /** Called from the positioner so cards follow scrolling. */
   reposition() {
     if (!this.active.length) return;
+    if (this.cb.locked()) {
+      this.end();
+      return;
+    }
     const targets = this.mode === 'all' ? this.cb.all() : [this.cb.hovered()].filter((t): t is PeekTarget => !!t);
     this.active = targets.filter((t) => this.active.some((a) => a.id === t.id));
     this.renderCards();
@@ -99,7 +108,16 @@ export class Peek {
     this.holdTimer = window.setTimeout(() => this.begin(), this.settings().peek.holdDelayMs);
   }
 
+  /** The lock came on: drop any peek in progress. */
+  cancel() {
+    this.end();
+  }
+
   private begin() {
+    if (this.cb.locked()) {
+      this.mode = null;
+      return;
+    }
     const targets = this.mode === 'all' ? this.cb.all() : [this.cb.hovered()].filter((t): t is PeekTarget => !!t);
     if (targets.length === 0) {
       this.mode = null;

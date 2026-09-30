@@ -18,7 +18,7 @@ import type { Masker } from '../mask/masker';
 import { defaultMaskMode } from '../mask/masker';
 import { coveredTextRanges } from '../mask/text-mask';
 import { buildFingerprint } from '../anchor/fingerprint';
-import { resolveFingerprint } from '../anchor/resolve';
+import { LOCKED_RESOLVE, resolveFingerprint } from '../anchor/resolve';
 import { anchorRect, projectRect } from '../anchor/rect-anchor';
 import { clientRects, clipChain, clipTo, docToView, isRendered, toViewRect, union, area } from '../anchor/geometry';
 import type { SiteStore } from './store';
@@ -36,6 +36,13 @@ interface Runtime {
   lastRectKey: string;
   /** For rect stickers: the last projected rect (viewport coords). */
   lastRect: ViewRect | null;
+  /**
+   * Element stickers while locked: candidates that tied with `el`. Each is
+   * masked too (mask id `<id>::tie<n>`) and drawn as part of the sticker.
+   */
+  ties: Element[];
+  /** Resolve again even though attached: the lock came on over a low-confidence match. */
+  recheck: boolean;
 }
 
 export interface SessionOptions {
@@ -67,6 +74,8 @@ export class Session {
   private maskTimer = 0;
   private maskRetryUntil = 0;
   private peeking = new Set<string>();
+  /** AI-session lock: no pause, weaker matches accepted, ties over-masked. */
+  private locked = false;
 
   private disposers: Array<() => void> = [];
 
@@ -273,10 +282,13 @@ export class Session {
   }
 
   setPaused(paused: boolean) {
+    // Defence in depth: the message handler already refuses this while locked.
+    if (paused && this.locked) return;
     this.paused = paused;
     for (const rt of this.runtimes.values()) {
       if (paused) {
         this.o.masker.restore(rt.sticker.id);
+        this.clearTies(rt);
         rt.view.hide();
       } else {
         this.applyMask(rt);
@@ -285,6 +297,32 @@ export class Session {
     if (paused) this.stopMaskRetry();
     else this.armMaskRetry();
     this.o.positioner.flush();
+    this.reportState();
+  }
+
+  get isLocked() {
+    return this.locked;
+  }
+
+  /**
+   * Lock or unlock. Locking forces protection back on and re-resolves every
+   * low-confidence element sticker with the locked options, so its ties get
+   * masked too. Unlocking drops the ties: the unlocked resolver masks one
+   * candidate and flags the sticker low confidence instead.
+   */
+  setLocked(on: boolean) {
+    if (this.locked === on) return;
+    this.locked = on;
+    if (on) {
+      if (this.paused) this.setPaused(false);
+      for (const rt of this.runtimes.values()) {
+        if (rt.sticker.kind === 'element' && rt.status === 'resolved' && rt.confidence === 'low') rt.recheck = true;
+      }
+      void this.resolveAll();
+    } else {
+      for (const rt of this.runtimes.values()) this.clearTies(rt);
+    }
+    this.o.positioner.markDirty();
     this.reportState();
   }
 
@@ -305,7 +343,7 @@ export class Session {
     }));
   }
 
-  state(): TabState {
+  state(): Omit<TabState, 'locked' | 'lockReason'> {
     const rts = Array.from(this.runtimes.values());
     return {
       editMode: this.editing,
@@ -363,7 +401,7 @@ export class Session {
     };
     this.o.store.upsert(sticker);
     const rt = this.track(sticker);
-    const container = await resolveFingerprint(a.container, { exclude: (e) => this.o.isOurs(e) });
+    const container = await resolveFingerprint(a.container, { exclude: (e) => this.o.isOurs(e), ...(this.locked ? LOCKED_RESOLVE : {}) });
     this.attach(rt, container?.el ?? document.body, 'high');
     this.o.positioner.flush();
     this.reportState();
@@ -517,6 +555,8 @@ export class Session {
       unresolvedSince: Date.now(),
       lastRectKey: '',
       lastRect: null,
+      ties: [],
+      recheck: false,
     };
     this.runtimes.set(sticker.id, rt);
     return rt;
@@ -527,6 +567,7 @@ export class Session {
     if (!rt) return;
     this.peeking.delete(id);
     this.o.masker.restore(id);
+    this.clearTies(rt);
     if (rt.el) this.o.positioner.unobserve(rt.el);
     rt.view.destroy();
     this.runtimes.delete(id);
@@ -534,9 +575,11 @@ export class Session {
 
   private attach(rt: Runtime, el: Element, confidence: Confidence) {
     if (rt.el && rt.el !== el) this.o.positioner.unobserve(rt.el);
+    this.clearTies(rt);
     rt.el = el;
     rt.status = 'resolved';
     rt.confidence = confidence;
+    rt.recheck = false;
     rt.clip = clipChain(el);
     rt.lastRectKey = '';
     this.o.positioner.observe(el);
@@ -546,6 +589,7 @@ export class Session {
   private detach(rt: Runtime, now: number) {
     if (rt.el) this.o.positioner.unobserve(rt.el);
     this.o.masker.restore(rt.sticker.id);
+    this.clearTies(rt);
     rt.el = null;
     rt.status = 'resolving';
     rt.unresolvedSince = now - (this.lostBudget() - DETACH_GRACE_MS);
@@ -556,6 +600,7 @@ export class Session {
   private markLost(rt: Runtime) {
     if (rt.status === 'lost') return;
     this.o.masker.restore(rt.sticker.id);
+    this.clearTies(rt);
     if (rt.el) this.o.positioner.unobserve(rt.el);
     rt.el = null;
     rt.status = 'lost';
@@ -565,6 +610,34 @@ export class Session {
   private lostBudget(): number {
     const sinceLoad = Date.now() - this.loadedAt;
     return document.readyState === 'complete' && sinceLoad > LOST_AFTER_LOAD_MS ? LOST_AFTER_LOAD_MS : LOST_AFTER_MS;
+  }
+
+  /**
+   * Locked only: mask every candidate that tied with the winner, so an
+   * ambiguous anchor over-masks instead of leaving the other record bare.
+   * Rect stickers are not handled: their container ties would each need a
+   * projected rectangle of their own.
+   */
+  private setTies(rt: Runtime, ties: Element[]) {
+    this.clearTies(rt);
+    const s = rt.sticker;
+    if (!this.locked || s.kind !== 'element' || this.paused) return;
+    rt.ties = ties.filter((t) => t !== rt.el && !this.o.isOurs(t));
+    rt.ties.forEach((t, i) => this.o.masker.apply(`${s.id}::tie${i}`, t, s.maskMode));
+  }
+
+  /** What `el` said before this sticker (or one of its ties) masked it. */
+  private maskedText(rt: Runtime, el: Element): string | undefined {
+    const id = rt.sticker.id;
+    if (el === rt.el && this.o.masker.has(id)) return this.o.masker.originals(id);
+    const i = rt.ties.indexOf(el);
+    if (i >= 0 && this.o.masker.has(`${id}::tie${i}`)) return this.o.masker.originals(`${id}::tie${i}`);
+    return undefined;
+  }
+
+  private clearTies(rt: Runtime) {
+    rt.ties.forEach((_, i) => this.o.masker.restore(`${rt.sticker.id}::tie${i}`));
+    rt.ties = [];
   }
 
   private applyMask(rt: Runtime) {
@@ -594,12 +667,21 @@ export class Session {
         this.resolveAgain = false;
         passes++;
         for (const rt of this.runtimes.values()) {
-          if (rt.status === 'resolved' && rt.el?.isConnected) continue;
-          if (rt.status === 'lost' && !this.editing) continue;
+          if (rt.status === 'resolved' && rt.el?.isConnected && !rt.recheck) continue;
+          // A lost sticker never masks, and edit mode (its only way back) is
+          // refused while locked; the lower locked threshold may still find it.
+          if (rt.status === 'lost' && !this.editing && !this.locked) continue;
+          rt.recheck = false;
           const fp = rt.sticker.kind === 'element' ? rt.sticker.anchor : rt.sticker.container;
-          const res = await resolveFingerprint(fp, { exclude: (e) => this.o.isOurs(e) || this.anchoredByOther(e, rt) });
+          const locked = this.locked;
+          const res = await resolveFingerprint(fp, {
+            exclude: (e) => this.o.isOurs(e) || this.anchoredByOther(e, rt),
+            textOf: (e) => this.maskedText(rt, e),
+            ...(locked ? LOCKED_RESOLVE : {}),
+          });
           if (res) {
             this.attach(rt, res.el, res.confidence);
+            if (locked && this.locked && res.ties.length) this.setTies(rt, res.ties);
             this.o.positioner.markDirty();
           }
         }
@@ -641,6 +723,16 @@ export class Session {
     // Recompute the clip chain occasionally: ancestors can change overflow.
     if (rt.clip.some((c) => !c.isConnected)) rt.clip = clipChain(el);
     const clipped = rects.map((r) => clipTo(r, rt.clip)).filter((r): r is ViewRect => !!r && area(r) > 0);
+    // Locked over-mask: the ties are drawn as part of this sticker, each
+    // clipped by its own scroll ancestors.
+    for (const t of rt.ties) {
+      if (!t.isConnected || !isRendered(t)) continue;
+      const chain = clipChain(t);
+      for (const r of clientRects(t)) {
+        const c = clipTo(r, chain);
+        if (c && area(c) > 0) clipped.push(c);
+      }
+    }
     rt.view.update(clipped, 'resolved', confidence);
   }
 

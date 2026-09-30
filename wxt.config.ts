@@ -10,7 +10,10 @@ export default defineConfig({
       description:
         'Place opaque stickers over sensitive page content. They stay attached to that content and hide it from AI agents (screenshots and page readers).',
       minimum_chrome_version: '120',
-      permissions: ['storage', 'scripting', 'activeTab', 'contextMenus', ...(dev ? ['debugger'] : [])],
+      permissions: ['storage', 'scripting', 'activeTab', 'contextMenus', 'alarms', ...(dev ? ['debugger'] : [])],
+      // Lets the AI-session lock see an attached debugger (a CDP-driven agent).
+      // Requested from the popup at the first session start; dev builds list it above.
+      optional_permissions: dev ? [] : ['debugger'],
       optional_host_permissions: ['*://*/*'],
       // Development builds pre-authorise the local fixtures server so the e2e
       // suite and manual testing don't need the permission prompt.

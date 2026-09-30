@@ -1,6 +1,7 @@
 import type { Settings, Sticker, TabState } from '@/shared/types';
 import { DEFAULT_TAB_STATE } from '@/shared/types';
-import { isToContent, type GetStickersResponse, type ToContent } from '@/shared/messages';
+import { isToContent, type GetStickersResponse, type LockUpdate, type LockedReply, type ToContent } from '@/shared/messages';
+import { SESSION_ACTIVE_KEY, computeLock, lockMessage, type LockState } from '@/shared/lock';
 import { loadOrCreateSecret, loadSettings } from '@/shared/storage';
 import { importKey } from '@/shared/hmac';
 import { mountHost } from './overlay/host';
@@ -16,6 +17,11 @@ import { SiteStore } from './state/store';
 import { Session } from './state/session';
 import { SpaNav } from './state/spa-nav';
 import { clientRects, union } from './anchor/geometry';
+
+/** storage.local, development builds only: see background.ts. */
+const DEV_NO_AUTO_LOCK = 'aibsNoAutoLock';
+/** Keep-alive / resync ping to the background while stickers or a lock are present. */
+const LOCK_PING_MS = 20_000;
 
 declare global {
   interface Window {
@@ -68,8 +74,8 @@ export async function boot() {
   let markReady!: () => void;
   const ready = new Promise<void>((r) => (markReady = r));
   let handleMessage: ((m: ToContent, sendResponse: (r?: unknown) => void) => boolean | void) | null = null;
-  chrome.runtime.onMessage.addListener((msg: unknown, _sender, sendResponse) => {
-    if (!isToContent(msg)) return;
+  chrome.runtime.onMessage.addListener((msg: unknown, sender, sendResponse) => {
+    if (!isToContent(msg) || sender.id !== chrome.runtime.id) return;
     ready.then(() => {
       const handledAsync = handleMessage?.(msg, sendResponse);
       if (handledAsync !== true) sendResponse(undefined);
@@ -77,11 +83,16 @@ export async function boot() {
     return true;
   });
 
+  // Ask the background for this tab's lock right away; the answer is applied
+  // whenever it arrives, without holding boot up.
+  const lockSync = chrome.runtime.sendMessage({ type: 'LOCK_SYNC' }).catch(() => undefined) as Promise<LockUpdate | undefined>;
+
   const depth = frameDepth();
-  const [store, settingsLoaded, secret] = await Promise.all([
+  const [store, settingsLoaded, secret, lockLocal] = await Promise.all([
     SiteStore.open(location.origin),
     loadSettings(),
     loadOrCreateSecret(),
+    chrome.storage.local.get([SESSION_ACTIVE_KEY, DEV_NO_AUTO_LOCK]).catch(() => ({}) as Record<string, unknown>),
   ]);
   let settings: Settings = settingsLoaded;
   setFingerprintKey(await importKey(secret));
@@ -127,6 +138,20 @@ export async function boot() {
     onGhostClick: (s) => startPick(s.id),
   });
 
+  // ---- AI-session lock: signals ----
+  // The background knows about attached debuggers and the manual session; the
+  // local mirror of the session lets a fresh tab lock before the background
+  // answers; `navigator.webdriver` is ours to read.
+  let bgLock: LockUpdate = { locked: false, debugger: false, manual: false };
+  let localSession = lockLocal[SESSION_ACTIVE_KEY] === true;
+  let noAutoLock = import.meta.env.DEV && lockLocal[DEV_NO_AUTO_LOCK] === true;
+  const webdriver = () => navigator.webdriver === true && !noAutoLock;
+  const currentLock = (): LockState =>
+    computeLock({ debuggerAttached: bgLock.debugger, manualSession: bgLock.manual || localSession, webdriver: webdriver() });
+  let lock: LockState = currentLock();
+  session.setLocked(lock.locked);
+  tabState = { ...tabState, locked: lock.locked, lockReason: lock.reason };
+
   hub.onBatch(() => {
     session.onMutationBatch();
     positioner.markDirty();
@@ -156,6 +181,7 @@ export async function boot() {
     },
     all: () => session.visible().map(toTarget),
     onPeek: (ids, on) => session.setPeek(ids, on),
+    locked: () => lock.locked,
   });
   peek.start();
 
@@ -179,7 +205,24 @@ export async function boot() {
     toolbar.setActive(null);
   }
 
+  /**
+   * A lifting action was attempted while locked: refuse it visibly, record it
+   * in the audit log (no content, just the action), and answer the sender.
+   */
+  function refuse(what: string, sendResponse?: (r?: unknown) => void): true {
+    const error = lockMessage(lock.reason);
+    if (depth === 0) toolbar.toast(`${error}: stickers stay on`);
+    chrome.runtime.sendMessage({ type: 'LOCK_REFUSED', what: `${what}/${lock.reason ?? ''}` }).catch(() => {});
+    const reply: LockedReply = { ok: false, locked: true, error };
+    sendResponse?.(reply);
+    return true;
+  }
+
   function setEditing(on: boolean) {
+    if (on && lock.locked) {
+      refuse('edit-mode');
+      return;
+    }
     if (editing === on) return;
     editing = on;
     session.setEditing(on);
@@ -192,6 +235,10 @@ export async function boot() {
   }
 
   function startPick(forId: string | null = null) {
+    if (lock.locked) {
+      refuse(forId ? 'reattach' : 'START_PICK');
+      return;
+    }
     stopTools();
     if (!editing) setEditing(true);
     reattachId = forId;
@@ -215,6 +262,10 @@ export async function boot() {
   }
 
   function startRect() {
+    if (lock.locked) {
+      refuse('START_RECT');
+      return;
+    }
     stopTools();
     if (!editing) setEditing(true);
     toolbar.setActive('rect');
@@ -231,6 +282,10 @@ export async function boot() {
   }
 
   async function coverSelection() {
+    if (lock.locked) {
+      refuse('cover-selection');
+      return;
+    }
     const sel = window.getSelection();
     if (!sel || sel.rangeCount === 0 || sel.isCollapsed) {
       toolbar.toast('Select some text first.');
@@ -272,6 +327,39 @@ export async function boot() {
     }
   }
 
+  // ---- AI-session lock: enforcement ----
+  function applyLock(next: LockState) {
+    const changed = next.locked !== lock.locked || next.reason !== lock.reason;
+    lock = next;
+    if (!changed) return;
+    if (lock.locked) {
+      // Nothing that lifts a sticker survives the lock coming on.
+      peek?.cancel();
+      stopTools();
+      editing = false;
+      session.setEditing(false);
+      toolbar.hide();
+    }
+    session.setLocked(lock.locked);
+    sendState({ locked: lock.locked, lockReason: lock.reason, paused: session.isPaused });
+    positioner.flush();
+  }
+  const relock = () => applyLock(currentLock());
+  const takeBgLock = (r: LockUpdate | undefined) => {
+    if (!r || typeof r.locked !== 'boolean') return;
+    bgLock = { locked: r.locked, reason: r.reason, debugger: r.debugger === true, manual: r.manual === true };
+    relock();
+  };
+  lockSync.then(takeBgLock);
+  // Keep the service worker (and its 2 s debugger poll) awake while there is
+  // something to protect, and resync in case a SET_LOCK was missed.
+  if (depth === 0) {
+    window.setInterval(() => {
+      if (!lock.locked && session.state().stickerCount === 0) return;
+      (chrome.runtime.sendMessage({ type: 'LOCK_SYNC' }) as Promise<LockUpdate | undefined>).then(takeBgLock).catch(() => {});
+    }, LOCK_PING_MS);
+  }
+
   // ---- context menu target ----
   let contextTarget: Element | null = null;
   window.addEventListener(
@@ -290,15 +378,21 @@ export async function boot() {
   // ---- messages ----
   handleMessage = (m, sendResponse) => {
     switch (m.type) {
+      case 'SET_LOCK':
+        takeBgLock(m);
+        sendResponse({ ok: true, locked: lock.locked, reason: lock.reason });
+        return true;
       case 'COMMAND':
         if (depth !== 0) return;
         if (m.name === 'toggle-edit-mode') setEditing(!editing);
         else if (m.name === 'cover-selection') coverSelection();
         break;
       case 'SET_EDIT_MODE':
+        if (m.enabled && lock.locked) return refuse('SET_EDIT_MODE', sendResponse);
         setEditing(m.enabled);
         break;
       case 'SET_PAUSED':
+        if (m.paused && lock.locked) return refuse('SET_PAUSED', sendResponse);
         session.setPaused(m.paused);
         break;
       case 'GET_STICKERS': {
@@ -311,9 +405,11 @@ export async function boot() {
         session.locate(m.id);
         break;
       case 'DELETE_STICKER':
+        if (lock.locked) return refuse('DELETE_STICKER', sendResponse);
         session.remove(m.id);
         break;
       case 'SET_SCOPE':
+        if (lock.locked) return refuse('SET_SCOPE', sendResponse);
         session.setScope(m.id, m.pathPattern);
         sendResponse({ ok: true });
         return true;
@@ -323,9 +419,11 @@ export async function boot() {
         }
         break;
       case 'START_PICK':
+        if (lock.locked) return refuse('START_PICK', sendResponse);
         if (depth === 0) startPick();
         break;
       case 'START_RECT':
+        if (lock.locked) return refuse('START_RECT', sendResponse);
         if (depth === 0) startRect();
         break;
       case 'TEST_COVER': {
@@ -365,7 +463,12 @@ export async function boot() {
             low: p.classList.contains('low'),
           };
         });
-        sendResponse({ stickers: session.summaries(), state: session.state(), pieces });
+        sendResponse({
+          stickers: session.summaries(),
+          state: { ...tabState, ...session.state() },
+          pieces,
+          lock: { ...lock, signals: { debugger: bgLock.debugger, manual: bgLock.manual, localSession, webdriver: webdriver() } },
+        });
         return true;
       }
     }
@@ -376,6 +479,14 @@ export async function boot() {
     if (area === 'local' && changes.settings?.newValue) {
       settings = changes.settings.newValue as Settings;
       host.setColor(settings.appearance.color);
+    }
+    if (area === 'local' && SESSION_ACTIVE_KEY in changes) {
+      localSession = changes[SESSION_ACTIVE_KEY].newValue === true;
+      relock();
+    }
+    if (import.meta.env.DEV && area === 'local' && DEV_NO_AUTO_LOCK in changes) {
+      noAutoLock = changes[DEV_NO_AUTO_LOCK].newValue === true;
+      relock();
     }
   });
 

@@ -1,15 +1,46 @@
+import type { LockReason } from './lock';
 import type { Sticker, TabState } from './types';
 
 /** Content script -> background. */
 export type ContentToBackground =
   | { type: 'TAB_STATUS'; state: Partial<TabState> }
-  | { type: 'ENSURE_ORIGIN'; origin: string };
+  | { type: 'ENSURE_ORIGIN'; origin: string }
+  /** Ask for this tab's lock; also the keep-alive ping while stickers or a lock are present. */
+  | { type: 'LOCK_SYNC' }
+  /** A lifting action was refused while locked; the background appends an audit entry. */
+  | { type: 'LOCK_REFUSED'; what: string };
+
+/** Popup -> background. */
+export type PopupToBackground =
+  | { type: 'START_SESSION'; allSites: boolean }
+  | { type: 'END_SESSION'; keepAllSites: boolean }
+  | { type: 'GET_SESSION' }
+  // Development builds only: start or end the manual session without the popup's prompts.
+  | { type: 'TEST_SESSION'; active: boolean };
+
+/** Background's view of one tab's lock, sent as SET_LOCK and as the LOCK_SYNC reply. */
+export interface LockUpdate {
+  locked: boolean;
+  reason?: LockReason;
+  /** The raw signals, so the content script can combine them with its own `navigator.webdriver`. */
+  debugger: boolean;
+  manual: boolean;
+}
+
+export interface SessionInfo {
+  active: boolean;
+  startedAt?: number;
+  keepAllSites: boolean;
+  allSitesGranted: boolean;
+  debuggerGranted: boolean;
+}
 
 /** Background/popup -> content script (delivered to every frame in the tab). */
 export type ToContent =
   | { type: 'COMMAND'; name: 'toggle-edit-mode' | 'cover-selection' }
   | { type: 'SET_EDIT_MODE'; enabled: boolean }
   | { type: 'SET_PAUSED'; paused: boolean }
+  | ({ type: 'SET_LOCK' } & LockUpdate)
   | { type: 'GET_STICKERS' }
   | { type: 'LOCATE_STICKER'; id: string }
   | { type: 'DELETE_STICKER'; id: string }
@@ -21,6 +52,13 @@ export type ToContent =
   | { type: 'TEST_COVER'; selector: string; shadowHost?: string }
   | { type: 'TEST_RECT'; rect: { x: number; y: number; w: number; h: number } }
   | { type: 'TEST_STATE' };
+
+/** Reply to a command the content script refused because the tab is locked. */
+export interface LockedReply {
+  ok: false;
+  locked: true;
+  error: string;
+}
 
 export interface StickerSummary {
   id: string;

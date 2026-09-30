@@ -30,6 +30,7 @@
   <button data-action="hide-toggle">Hide / show table</button>
   <button data-action="scale">Scale container</button>
   <button data-action="delete-row">Delete target row</button>
+  <button data-action="duplicate-target-row">Duplicate target row</button>
   <button data-action="reset">Reset</button>
 </div>
 <div id="above"></div>
@@ -57,7 +58,7 @@
     tbody.innerHTML = state.rows
       .map(
         (r, i) =>
-          `<tr class="row-${state.hash} css-${state.hash}${i}" data-key="${r.acct}">` +
+          `<tr class="row-${state.hash} css-${state.hash}${i}" data-key="${r.key || r.acct}">` +
           state.order.map((k) => `<td class="cell-${state.hash} col-${k}" data-col="${LABELS[k]}">${r[k]}</td>`).join('') +
           '</tr>',
       )
@@ -79,6 +80,15 @@
     'hide-toggle': () => { const t = document.getElementById('table-host'); t.style.display = t.style.display === 'none' ? '' : 'none'; },
     'scale': () => document.getElementById('table-host').classList.toggle('scaled'),
     'delete-row': () => { state.rows = state.rows.filter((r) => r.acct !== '9876543210'); render(); },
+    // Two identical-looking rows: the target record is re-rendered twice at
+    // the end of the list, each copy with the same data under a new data-key.
+    // Nothing tells the copies apart, so the resolver sees a tie.
+    'duplicate-target-row': () => {
+      const t = state.rows.find((r) => r.acct === '9876543210');
+      state.rows = state.rows.filter((r) => r !== t);
+      state.rows.push({ ...t, key: 'dup-a' }, { ...t, key: 'dup-b' });
+      render();
+    },
     'reset': () => { location.reload(); },
   };
 

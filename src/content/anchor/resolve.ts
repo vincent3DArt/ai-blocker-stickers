@@ -19,7 +19,21 @@ export interface ResolveOptions {
   threshold?: number;
   /** Minimum margin over the runner-up for high confidence. */
   margin?: number;
+  /**
+   * Original text for an element we masked ourselves. Re-resolving a sticker
+   * that is still attached (the lock coming on) must not read our own bullets,
+   * or the current anchor would lose its text match to an unmasked twin.
+   */
+  textOf?: (el: Element) => string | undefined;
 }
+
+/**
+ * Options while the AI-session lock is on: accept weaker matches (30, not
+ * 45). The margin still defines which candidates tie with the winner, but it
+ * no longer decides anything alone: the session masks the winner and every
+ * tie, so an ambiguous anchor over-masks instead of leaving a record bare.
+ */
+export const LOCKED_RESOLVE: Pick<ResolveOptions, 'threshold' | 'margin'> = { threshold: 30, margin: 10 };
 
 const W = {
   id: 40,
@@ -208,7 +222,7 @@ export async function resolveFingerprint(fp: Fingerprint, opts: ResolveOptions =
     else s += W.cssPath * 0.5 * cssSegmentsMatch(fp, el);
     if (xpathExact.has(el)) s += W.xpath;
     if (fp.textHmac) {
-      const h = await textHmacOf(fingerprintText(el));
+      const h = await textHmacOf(opts.textOf?.(el) ?? fingerprintText(el));
       if (h && h === fp.textHmac) {
         s += W.textHmac;
         identityMatched = true;
@@ -273,6 +287,7 @@ export async function resolveFingerprint(fp: Fingerprint, opts: ResolveOptions =
   if (!second || best.score - second.score >= margin) {
     return { el: best.el, score: best.score, confidence: 'high', ties: [] };
   }
-  const ties = scored.filter((s) => best.score - s.score < margin).map((s) => s.el);
+  // A tie must itself clear the threshold: the locked session masks every tie.
+  const ties = scored.filter((s) => best.score - s.score < margin && s.score >= threshold).map((s) => s.el);
   return { el: best.el, score: best.score, confidence: 'low', ties: ties.slice(1) };
 }

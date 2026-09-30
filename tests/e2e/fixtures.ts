@@ -18,8 +18,13 @@ export interface PieceInfo {
 
 export interface TestState {
   stickers: { id: string; kind: 'element' | 'rect'; status: 'resolving' | 'resolved' | 'lost'; pathPattern: string }[];
-  state: { editMode: boolean; paused: boolean; stickerCount: number; lostCount: number };
+  state: { editMode: boolean; paused: boolean; stickerCount: number; lostCount: number; peeking?: boolean; locked?: boolean; lockReason?: string };
   pieces: PieceInfo[];
+  lock?: {
+    locked: boolean;
+    reason?: string;
+    signals: { debugger: boolean; manual: boolean; localSession: boolean; webdriver: boolean };
+  };
 }
 
 export interface Ext {
@@ -61,6 +66,10 @@ export const test = base.extend<{ ext: Ext; page: Page }>({
       }
       throw new Error('content script never registered');
     });
+    // Playwright is itself a debugger on every tab and sets navigator.webdriver,
+    // so the AI-session auto-lock would lock the whole suite. The dev build
+    // honours this flag; tests/e2e/lock.spec.ts clears it.
+    await worker.evaluate(() => chrome.storage.local.set({ aibsNoAutoLock: true }));
 
     const send = async <T,>(page: Page, msg: Record<string, unknown>): Promise<T> => {
       await page.bringToFront();

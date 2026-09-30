@@ -212,6 +212,8 @@ export const DEFAULT_SETTINGS: Settings = {
   ghostAnchors: true,
 };
 
+import type { LockReason } from './lock';
+
 /** Runtime status of one sticker inside a frame. */
 export type AnchorStatus = 'resolving' | 'resolved' | 'lost';
 
@@ -225,6 +227,9 @@ export interface TabState {
   peeking: boolean;
   /** The last save could not persist every sticker on this site (see SiteStore.flush). */
   saveError: boolean;
+  /** AI-session lock: peek, pause, delete and the edit tools are refused. */
+  locked: boolean;
+  lockReason?: LockReason;
 }
 
 export const DEFAULT_TAB_STATE: TabState = {
@@ -234,4 +239,5 @@ export const DEFAULT_TAB_STATE: TabState = {
   lostCount: 0,
   peeking: false,
   saveError: false,
+  locked: false,
 };

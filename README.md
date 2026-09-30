@@ -84,6 +84,28 @@ still sees bullets while you are peeking.
 **Pause.** A popup checkbox pauses protection on the current tab and reveals everything. The toolbar
 badge turns red while it is paused.
 
+**AI session lock.** Agents that drive the browser through the DevTools protocol (Claude in Chrome,
+Playwright, Puppeteer) send input the page cannot tell from yours. So while a lock is on, nothing
+can lift a sticker. Peek is refused. So are edit mode, the picker, rectangles, cover selection,
+delete, scope changes, pause, and disabling the site. Stickers stay applied, the toolbar is hidden,
+and the badge shows a lock. Weak anchors over-mask: the match threshold drops, and when two
+elements tie, both are covered.
+
+The lock comes on in three ways:
+
+- **Debugger attached.** Grant the optional `debugger` permission and the extension checks every
+  2 seconds whether a debugger is attached to a tab with stickers. That tab locks until it
+  detaches. Opening DevTools on a tab locks it too.
+- **`navigator.webdriver`.** A page driven by WebDriver or Playwright locks itself.
+- **AI session.** Click "Start AI session" in the popup before you hand the browser to an agent.
+  Every tab locks until you click "End session" and confirm. The first start asks for access to all
+  sites, so stickers apply everywhere, and for the `debugger` permission. Tick "Keep protection on
+  all sites" when you end it to keep the all-sites content script.
+
+The popup's "Lock activity" section shows the last five lock events: session start and end,
+auto-lock and unlock, and refused actions. The log keeps 200 entries and records only the origin
+and the action, never covered text.
+
 **Scope.** Each sticker is scoped to a URL path pattern. The default replaces an ID-like last
 segment with a wildcard, so `/clients/123` becomes `/clients/*`. The popup also offers an exact path
 or the whole site.
@@ -138,6 +160,10 @@ The fixture server on port 4173 starts automatically through Playwright's `webSe
 development build alone pre-authorises `http://127.0.0.1:4173`, so the tests never hit a permission
 prompt; production builds request every origin from the user.
 
+Playwright is itself a debugger on every tab and sets `navigator.webdriver`, so the suite would run
+permanently locked. The development build honours a storage flag that turns auto-lock off, and the
+test fixture sets it. `tests/e2e/lock.spec.ts` clears it to test the lock.
+
 The main anchoring test uses the layout-shift matrix fixture at `fixtures/layout-shift.html`. Its
 buttons reproduce each row of the design's layout matrix: insert content above, reorder columns,
 swap fonts, toggle a responsive breakpoint, move a cell into a modal, re-render with new class
@@ -152,8 +178,6 @@ addresses, and CI runs it on every push.
 
 - **Auto-suggest scanner.** Idle-chunked scanning for SSN, EIN, routing, account, IBAN, card, and
   date-of-birth patterns, with validators and label keywords, offered as dashed suggestion chips.
-- **AI-session lock.** Detect an attached debugger or `navigator.webdriver`, or start a session
-  manually; while locked, peek, edit, pause, and delete are refused and weak anchors over-mask.
 - **Strict input masking.** An opt-in mode that swaps `.value` outright and restores it from the
   `formdata` event at submission time.
 
