@@ -141,7 +141,8 @@ export async function boot() {
 
   // ---- peek ----
   let pointer = { x: -1, y: -1 };
-  window.addEventListener('mousemove', (e) => (pointer = { x: e.clientX, y: e.clientY }), { capture: true, passive: true });
+  // Untrusted (script-dispatched) moves must not aim a peek at a sticker.
+  window.addEventListener('mousemove', (e) => e.isTrusted && (pointer = { x: e.clientX, y: e.clientY }), { capture: true, passive: true });
   const toTarget = (hit: { sticker: Sticker; rect: { x: number; y: number; w: number; h: number }; el: Element | null }): PeekTarget => ({
     id: hit.sticker.id,
     rect: hit.rect,
@@ -321,7 +322,8 @@ export async function boot() {
         break;
       case 'TEST_COVER': {
         if (!import.meta.env.DEV) return;
-        const el = document.querySelector(m.selector);
+        const scope = m.shadowHost ? document.querySelector(m.shadowHost)?.shadowRoot : document;
+        const el = scope?.querySelector(m.selector);
         if (!el) {
           sendResponse({ ok: false, error: 'no element' });
           return true;

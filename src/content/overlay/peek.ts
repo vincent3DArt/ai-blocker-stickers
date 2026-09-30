@@ -45,6 +45,12 @@ export class Peek {
       this.disposers.push(() => window.removeEventListener(type, fn, true));
     };
     on('keydown', (e) => {
+      // Only real keystrokes may reveal anything. A page script (an agent's
+      // injected code included) can dispatch KeyboardEvents at will; those are
+      // never trusted. Input synthesised through CDP is trusted and cannot be
+      // told apart here: see docs/LIMITATIONS.md. Releases stay untrusted-ok:
+      // ending a peek early is always safe.
+      if (!e.isTrusted) return;
       if (this.mode) return;
       const s = this.settings().peek;
       if (comboMatches(s.all, e)) this.arm('all', e);

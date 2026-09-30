@@ -17,13 +17,27 @@ export interface OverlayHost {
 
 const TAG = 'aibs-host';
 
+const HOST_ATTRS: Array<[string, string]> = [
+  ['popover', 'manual'],
+  ['aria-hidden', 'true'],
+  ['role', 'presentation'],
+  ['data-aibs', ''],
+];
+
 export function mountHost(): OverlayHost {
   const el = document.createElement(TAG);
-  el.setAttribute('popover', 'manual');
-  el.setAttribute('aria-hidden', 'true');
-  el.setAttribute('role', 'presentation');
-  el.setAttribute('data-aibs', '');
-  applyHostStyle(el);
+  for (const [a, v] of HOST_ATTRS) el.setAttribute(a, v);
+  let color = '';
+  let fallbackZ = false;
+  let expectedStyle: string | null = null;
+  /** (Re)write every inline declaration; afterwards the attribute is known to be ours. */
+  function styleHost() {
+    applyHostStyle(el);
+    if (color) el.style.setProperty('--aibs-color', color);
+    if (fallbackZ) el.style.setProperty('z-index', '2147483647', 'important');
+    expectedStyle = el.getAttribute('style');
+  }
+  styleHost();
 
   const root = el.attachShadow({ mode: 'closed' });
   try {
@@ -45,6 +59,8 @@ export function mountHost(): OverlayHost {
 
   let usingTopLayer = false;
   let lastTopLayerSignature = '';
+  let selfHiding = false;
+  let destroyed = false;
 
   function mount() {
     if (!el.isConnected) document.documentElement.appendChild(el);
@@ -55,16 +71,59 @@ export function mountHost(): OverlayHost {
   function promote() {
     try {
       if (usingTopLayer && el.matches(':popover-open')) {
-        el.hidePopover();
+        selfHiding = true;
+        try {
+          el.hidePopover();
+        } finally {
+          selfHiding = false;
+        }
       }
       el.showPopover();
       usingTopLayer = true;
-      el.style.zIndex = '';
+      if (fallbackZ) {
+        fallbackZ = false;
+        styleHost();
+      }
     } catch {
       usingTopLayer = false;
-      el.style.zIndex = '2147483647';
+      if (!fallbackZ) {
+        fallbackZ = true;
+        styleHost();
+      }
     }
   }
+
+  // The page (or a script injected into it) can take the overlay away:
+  // remove the host, close its popover, strip `popover`, or restyle it. Undo
+  // each of those in the same microtask, before the next frame is painted,
+  // instead of waiting for the positioner's slow tick. Page STYLESHEETS lose to
+  // the host's inline !important declarations and need no watching.
+  el.addEventListener('beforetoggle', (e) => {
+    if (destroyed || selfHiding || (e as Event & { newState?: string }).newState !== 'closed') return;
+    queueMicrotask(() => {
+      if (!destroyed && !el.matches(':popover-open')) promote();
+    });
+  });
+  const watchdog = new MutationObserver((records) => {
+    if (destroyed) return;
+    let remount = false;
+    let restyle = false;
+    let reattr = false;
+    for (const r of records) {
+      if (r.type === 'childList') remount = true;
+      else if (r.attributeName === 'style') restyle = el.getAttribute('style') !== expectedStyle;
+      else if (r.attributeName) reattr = true;
+    }
+    if (reattr) {
+      for (const [a, v] of HOST_ATTRS) if (el.getAttribute(a) !== v) el.setAttribute(a, v);
+      for (const a of ['hidden', 'inert']) if (el.hasAttribute(a)) el.removeAttribute(a);
+      promote();
+    }
+    if (restyle) styleHost();
+    if (remount && el.parentElement !== document.documentElement) mount();
+  });
+  watchdog.observe(document.documentElement, { childList: true });
+  watchdog.observe(el, { attributes: true, attributeFilter: ['style', ...HOST_ATTRS.map(([a]) => a), 'hidden', 'inert'] });
 
   function topLayerSignature(): string {
     // Anything the page pushed into the top layer after us stacks above us.
@@ -105,10 +164,13 @@ export function mountHost(): OverlayHost {
       return r === root;
     },
     reassert,
-    setColor(color) {
-      el.style.setProperty('--aibs-color', color);
+    setColor(c) {
+      color = c;
+      styleHost();
     },
     destroy() {
+      destroyed = true;
+      watchdog.disconnect();
       try {
         if (el.matches(':popover-open')) el.hidePopover();
       } catch {
@@ -120,7 +182,10 @@ export function mountHost(): OverlayHost {
 }
 
 function applyHostStyle(el: HTMLElement) {
-  // Override the UA popover styles (border, padding, fit-content sizing).
+  // Override the UA popover styles (border, padding, fit-content sizing), and
+  // make every declaration inline !important: that beats any page stylesheet
+  // rule, `!important` and `all:` included, so a page cannot hide, shrink,
+  // fade or move the overlay with CSS.
   el.style.cssText = [
     'position:fixed',
     'inset:0',
@@ -129,6 +194,8 @@ function applyHostStyle(el: HTMLElement) {
     'border:0',
     'width:100vw',
     'height:100vh',
+    'min-width:0',
+    'min-height:0',
     'max-width:none',
     'max-height:none',
     'background:transparent',
@@ -136,8 +203,21 @@ function applyHostStyle(el: HTMLElement) {
     'overflow:visible',
     'pointer-events:none',
     'display:block',
+    'visibility:visible',
+    'opacity:1',
+    'transform:none',
+    'translate:none',
+    'scale:none',
+    'rotate:none',
+    'filter:none',
+    'clip-path:none',
+    'mask:none',
+    'zoom:1',
+    'content-visibility:visible',
     'contain:layout style',
-  ].join(';');
+  ]
+    .map((d) => `${d} !important`)
+    .join(';');
 }
 
 export function isHostElement(node: Node | null): boolean {

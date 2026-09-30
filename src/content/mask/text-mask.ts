@@ -9,17 +9,48 @@ export function isBullets(s: string): boolean {
 
 const SKIP_TAGS = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE']);
 
-/** Text nodes under `root` (including `root` itself if it is a Text node) that carry visible characters. */
+/**
+ * The shadow root hanging off `el`, if any. Open roots are always reachable;
+ * closed ones only through the extension-only `chrome.dom` API, which we ask
+ * for custom elements alone (asking for every element of every scan is not
+ * free). Our own overlay host is never entered.
+ */
+export function shadowRootOf(el: Element): ShadowRoot | null {
+  if (el.tagName === 'AIBS-HOST') return null;
+  const open = (el as HTMLElement).shadowRoot;
+  if (open) return open;
+  if (!el.tagName.includes('-')) return null;
+  try {
+    const dom = (globalThis as { chrome?: { dom?: { openOrClosedShadowRoot?: (e: HTMLElement) => ShadowRoot | null } } }).chrome?.dom;
+    return dom?.openOrClosedShadowRoot?.(el as HTMLElement) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Text nodes under `root` (including `root` itself if it is a Text node) that
+ * carry visible characters. Descends into shadow roots: their text is
+ * rendered under the sticker and reaches the accessibility tree like any
+ * other, even though a document-level TreeWalker never enters them.
+ */
 export function collectTextNodes(root: Node): Text[] {
   const out: Text[] = [];
   if (root.nodeType === Node.TEXT_NODE) {
     if (/\S/.test((root as Text).data)) out.push(root as Text);
     return out;
   }
+  if (root.nodeType === Node.ELEMENT_NODE) {
+    const sr = shadowRootOf(root as Element);
+    if (sr) out.push(...collectTextNodes(sr));
+  }
   const walker = root.ownerDocument!.createTreeWalker(root, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT, {
     acceptNode(node) {
       if (node.nodeType === Node.ELEMENT_NODE) {
-        return SKIP_TAGS.has((node as Element).tagName) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_SKIP;
+        if (SKIP_TAGS.has((node as Element).tagName)) return NodeFilter.FILTER_REJECT;
+        const sr = shadowRootOf(node as Element);
+        if (sr) out.push(...collectTextNodes(sr));
+        return NodeFilter.FILTER_SKIP;
       }
       return /\S/.test((node as Text).data) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP;
     },

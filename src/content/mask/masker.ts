@@ -2,7 +2,18 @@ import type { MaskMode } from '@/shared/types';
 import type { MutationHub } from './guard';
 import { MASK_ATTR, installMaskSheet } from './sheet';
 import { bullets, collectTextNodes, type TextRange } from './text-mask';
-import { restoreAttrs, scrubAttrs, SCRUB_ATTRS, type AttrBackup } from './attr-mask';
+import {
+  leaks,
+  remember,
+  restoreAttrs,
+  scrubAttrs,
+  scrubTokenAttrs,
+  SCRUB_ATTRS,
+  tokenScrubbable,
+  tokensOf,
+  type AttrBackup,
+  type Tokens,
+} from './attr-mask';
 
 /**
  * One Text node the rect masker cut into pieces. `original` is the page's own
@@ -27,12 +38,75 @@ interface MaskRecord {
   /** The page rewrote a split node: the mask was undone and must be recomputed. */
   stale: boolean;
   attrs: AttrBackup;
-  prev: { ariaHidden: string | null; tabIndex: string | null; maskAttr: string | null };
+  prev: { ariaHidden: string | null; tabIndex: string | null; maskAttr: string | null; style: string | null };
+  /** Page's own inline value of every style property we forced on the root. */
+  styleBackup: Map<string, { value: string; priority: string }>;
+  /** Size pins for an image whose source we swapped out (keeps its box). */
+  pins: Array<[string, string]>;
+  /**
+   * What the root showed before masking (text, value or image source), in
+   * memory only, like the originals. A re-rendered copy must match it to
+   * inherit the mask: the same slot alone may hold a different record.
+   */
+  signature: string;
   peeking: boolean;
 }
 
 const INPUT_TAGS = new Set(['INPUT', 'TEXTAREA', 'SELECT']);
 const MEDIA_TAGS = new Set(['IMG', 'CANVAS', 'VIDEO', 'PICTURE', 'OBJECT', 'EMBED']);
+/** Input types whose `value` content attribute is only the default (`value` mode). */
+const VALUE_MODE_TYPES = new Set([
+  'text',
+  'search',
+  'tel',
+  'url',
+  'email',
+  'password',
+  'number',
+  'date',
+  'datetime-local',
+  'month',
+  'week',
+  'time',
+  'color',
+  'range',
+]);
+/** 1x1 transparent GIF standing in for a covered image's real source. */
+const PLACEHOLDER_SRC = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
+
+/** Parent across a shadow boundary: a shadow root's top-level nodes belong to its host. */
+function up(n: Node): Element | null {
+  const p = n.parentNode;
+  if (!p) return null;
+  if (p.nodeType === Node.ELEMENT_NODE) return p as Element;
+  return (p as ShadowRoot).host ?? null;
+}
+
+function signatureOf(el: Element, mode: MaskMode): string {
+  if (mode === 'input') return (el as HTMLInputElement).value ?? el.textContent ?? '';
+  if (mode === 'visual-only') {
+    const srcs = mediaSources(el);
+    return srcs.length ? srcs.map((s) => `${s.getAttribute('src')}|${s.getAttribute('srcset')}`).join(';') : el.outerHTML;
+  }
+  return collectTextNodes(el)
+    .map((t) => t.data)
+    .join('')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function isValueModeInput(el: Element): el is HTMLInputElement {
+  return el instanceof HTMLInputElement && VALUE_MODE_TYPES.has(el.type);
+}
+
+/** The IMG itself plus the <source>s of its <picture>: all of them name the pixels. */
+function mediaSources(root: Element): Element[] {
+  const out: Element[] = [];
+  const pic = root.tagName === 'PICTURE' ? root : root.tagName === 'IMG' && root.parentElement?.tagName === 'PICTURE' ? root.parentElement : null;
+  if (pic) out.push(...Array.from(pic.querySelectorAll('source, img')));
+  else if (root.tagName === 'IMG') out.push(root);
+  return out;
+}
 
 export function defaultMaskMode(el: Element): MaskMode {
   if (INPUT_TAGS.has(el.tagName) || el.closest('[contenteditable]:not([contenteditable="false"])')) return 'input';
@@ -62,6 +136,22 @@ export class Masker {
   private ownScheduled = false;
   private disposeHub: (() => void) | null = null;
   private disposers: Array<() => void> = [];
+  /** Records the page disturbed during the current mutation callback. */
+  private pendingStale = new Set<string>();
+
+  /**
+   * The page replaced a masked root with a structurally identical element (a
+   * framework re-rendering the parent). The mask has already moved to `el`;
+   * the owner updates its anchor. For rect records only the container moved:
+   * the owner must rescan.
+   */
+  onRebind: ((id: string, el: Element) => void) | null = null;
+  /**
+   * The page rewrote text a rect record had cut apart; the mask is gone until
+   * the owner rescans. Called synchronously, inside the mutation callback, so
+   * the rescan lands before any other task can read the raw text.
+   */
+  onStale: ((id: string) => void) | null = null;
 
   constructor(private hub: MutationHub) {}
 
@@ -87,6 +177,22 @@ export class Masker {
     }
     window.addEventListener('focusin', onFocus, true);
     this.disposers.push(() => window.removeEventListener('focusin', onFocus, true));
+    // A form reset goes back to the `value` attribute / textarea text, which we
+    // blanked. Hand the page its defaults back for the reset itself, then blank
+    // them again once the reset has run (it runs after this event, in the same
+    // task, so a timer is the first safe moment).
+    const onReset = (e: Event) => {
+      const form = e.target as Element | null;
+      if (!form) return;
+      const recs = Array.from(this.records.values()).filter((r) => r.mode === 'input' && form.contains(r.root));
+      for (const r of recs) this.restoreDefaults(r);
+      if (recs.length)
+        setTimeout(() => {
+          for (const r of recs) if (this.records.get(r.id) === r && r.root.isConnected) this.scrubDefaults(r);
+        }, 0);
+    };
+    window.addEventListener('reset', onReset, true);
+    this.disposers.push(() => window.removeEventListener('reset', onReset, true));
   }
 
   stop() {
@@ -114,6 +220,7 @@ export class Masker {
     const rec = this.newRecord(id, root, mode, false);
     this.records.set(id, rec);
     this.byRoot.set(root, rec);
+    this.watchRoot(root);
     this.applyRecord(rec);
   }
 
@@ -210,6 +317,7 @@ export class Masker {
     rec.texts.clear();
     restoreAttrs(rec.attrs, (el, a, v) => this.writeAttr(el, a, v));
     if (!rec.subset && rec.root.isConnected) {
+      this.restoreStyle(rec);
       this.writeAttr(rec.root, 'aria-hidden', rec.prev.ariaHidden);
       this.writeAttr(rec.root, 'tabindex', rec.prev.tabIndex);
       this.writeAttr(rec.root, MASK_ATTR, rec.prev.maskAttr);
@@ -234,7 +342,10 @@ export class Masker {
     const rec = this.records.get(id);
     if (!rec) return;
     rec.peeking = on;
-    if (rec.mode === 'input') this.writeAttr(rec.root, MASK_ATTR, on ? 'input-peek' : 'input');
+    if (rec.mode === 'input') {
+      this.writeAttr(rec.root, MASK_ATTR, on ? 'input-peek' : 'input');
+      this.enforceStyle(rec);
+    }
   }
 
   isMaskedNode(node: Node): boolean {
@@ -246,15 +357,22 @@ export class Masker {
       for (const rec of this.records.values()) if (rec.texts.has(node as Text)) return rec;
       const owner = this.splitOwner.get(node as Text);
       if (owner) return owner.rec;
-      node = node.parentNode ?? node;
     }
-    let el: Element | null = node as Element;
+    // Walk up across shadow boundaries: text inside a shadow tree under a
+    // masked host belongs to the host's record.
+    let el: Element | null = node.nodeType === Node.ELEMENT_NODE ? (node as Element) : up(node) ?? (node as ShadowRoot).host ?? null;
     while (el) {
       const rec = this.byRoot.get(el);
       if (rec) return rec;
-      el = el.parentElement;
+      el = up(el);
     }
     return undefined;
+  }
+
+  /** Masked content inside a shadow tree needs that tree observed too. */
+  private watchRoot(n: Node) {
+    const r = n.getRootNode();
+    if (r !== n && r.nodeType === Node.DOCUMENT_FRAGMENT_NODE) this.hub.observe(r);
   }
 
   private newRecord(id: string, root: Element, mode: MaskMode, subset: boolean): MaskRecord {
@@ -271,29 +389,168 @@ export class Masker {
         ariaHidden: root.getAttribute('aria-hidden'),
         tabIndex: root.getAttribute('tabindex'),
         maskAttr: root.getAttribute(MASK_ATTR),
+        style: root.getAttribute('style'),
       },
+      styleBackup: new Map(),
+      pins: [],
+      signature: signatureOf(root, mode),
       peeking: false,
     };
   }
 
   private applyRecord(rec: MaskRecord) {
     const { root, mode } = rec;
+    const write = (el: Element, a: string, v: string | null) => this.writeAttr(el, a, v);
     if (mode === 'text') {
       for (const t of collectTextNodes(root)) this.maskText(rec, t);
-      scrubAttrs(rec.attrs, root, (el, a, v) => this.writeAttr(el, a, v));
+      scrubAttrs(rec.attrs, root, write);
+      scrubTokenAttrs(rec.attrs, root, this.tokens(rec), write);
       this.writeAttr(root, MASK_ATTR, 'text');
     } else if (mode === 'input') {
-      scrubAttrs(rec.attrs, root, (el, a, v) => this.writeAttr(el, a, v));
+      scrubAttrs(rec.attrs, root, write);
+      this.scrubDefaults(rec);
+      scrubTokenAttrs(rec.attrs, root, this.tokens(rec), write);
       this.writeAttr(root, MASK_ATTR, rec.peeking ? 'input-peek' : 'input');
       this.writeAttr(root, 'tabindex', '-1');
       if (document.activeElement === root || root.contains(document.activeElement)) {
         (document.activeElement as HTMLElement | null)?.blur?.();
       }
     } else {
-      scrubAttrs(rec.attrs, root, (el, a, v) => this.writeAttr(el, a, v));
+      scrubAttrs(rec.attrs, root, write);
+      this.scrubMedia(rec);
       this.writeAttr(root, MASK_ATTR, 'visual');
     }
     this.writeAttr(root, 'aria-hidden', 'true');
+    this.enforceStyle(rec);
+  }
+
+  /** What an attribute would have to repeat to leak this record's content. */
+  private tokens(rec: MaskRecord): Tokens {
+    if (rec.mode === 'input') {
+      const el = rec.root as HTMLInputElement;
+      return tokensOf([el.value ?? '', ...rec.texts.values()]);
+    }
+    return tokensOf(rec.texts.values());
+  }
+
+  /**
+   * An input's `value` attribute (and a textarea's text) is its DEFAULT value,
+   * and it is serialised into innerHTML/outerHTML and read by getAttribute.
+   * Assigning `.value` first flips the control's dirty flag, so the live value
+   * (what the form submits) stops following the default; only then is the
+   * default blanked. The live `.value` itself is the documented residual.
+   */
+  private scrubDefaults(rec: MaskRecord) {
+    const el = rec.root;
+    if (isValueModeInput(el)) {
+      const v = el.getAttribute('value');
+      if (!v) return;
+      const live = el.value;
+      el.value = live;
+      remember(rec.attrs, el, 'value');
+      this.writeAttr(el, 'value', '');
+    } else if (el instanceof HTMLTextAreaElement) {
+      const kids = collectTextNodes(el);
+      if (kids.length === 0) return;
+      const live = el.value;
+      el.value = live;
+      for (const t of kids) this.maskText(rec, t);
+    }
+  }
+
+  private restoreDefaults(rec: MaskRecord) {
+    const el = rec.root;
+    if (isValueModeInput(el)) {
+      const orig = rec.attrs.get(el)?.get('value');
+      if (orig != null) this.writeAttr(el, 'value', orig);
+    } else if (el instanceof HTMLTextAreaElement) {
+      for (const [t, original] of rec.texts) if (t.isConnected) this.writeText(t, original);
+    }
+  }
+
+  /**
+   * A covered image's source names its pixels: anything that can read the
+   * DOM can fetch it again (or, for a data: URL, simply has it). Swap in a
+   * transparent placeholder while covered, pinning the box so nothing moves.
+   */
+  private scrubMedia(rec: MaskRecord) {
+    const sources = mediaSources(rec.root);
+    if (sources.length === 0) return;
+    const img = rec.root as HTMLImageElement;
+    if (img.tagName === 'IMG' && rec.pins.length === 0 && !img.hasAttribute('width') && !img.hasAttribute('height')) {
+      const w = img.offsetWidth;
+      const h = img.offsetHeight;
+      if (w > 0 && h > 0) rec.pins = [
+        ['width', `${w}px`],
+        ['height', `${h}px`],
+      ];
+    }
+    for (const el of sources) this.scrubMediaAttrs(rec, el);
+  }
+
+  private scrubMediaAttrs(rec: MaskRecord, el: Element) {
+    for (const a of ['src', 'srcset']) {
+      const v = el.getAttribute(a);
+      const want = a === 'src' && el.tagName === 'IMG' ? PLACEHOLDER_SRC : null;
+      if (v === null || v === want) continue;
+      remember(rec.attrs, el, a);
+      this.writeAttr(el, a, want);
+    }
+  }
+
+  /**
+   * Style properties the mask relies on, forced INLINE with !important. The
+   * adopted sheet alone loses to an inline `!important` declaration, to a
+   * page rule with higher specificity, and to a script clearing
+   * `document.adoptedStyleSheets`; an inline !important declaration loses to
+   * none of them, and the guard re-applies it whenever the page edits `style`.
+   */
+  private wantedStyles(rec: MaskRecord): Array<[string, string]> {
+    if (rec.subset) return [];
+    const out: Array<[string, string]> = [...rec.pins];
+    if (rec.mode === 'input' && !rec.peeking) out.push(['-webkit-text-security', 'disc']);
+    if (rec.mode === 'visual-only') out.push(['visibility', 'hidden']);
+    return out;
+  }
+
+  private enforceStyle(rec: MaskRecord) {
+    const style = (rec.root as HTMLElement).style as CSSStyleDeclaration | undefined;
+    if (!style) return;
+    const wanted = this.wantedStyles(rec);
+    const names = new Set(wanted.map(([p]) => p));
+    for (const [p, v] of wanted) {
+      if (!rec.styleBackup.has(p)) rec.styleBackup.set(p, { value: style.getPropertyValue(p), priority: style.getPropertyPriority(p) });
+      if (style.getPropertyValue(p) !== v || style.getPropertyPriority(p) !== 'important') style.setProperty(p, v, 'important');
+    }
+    for (const [p, b] of Array.from(rec.styleBackup)) {
+      if (names.has(p)) continue;
+      if (b.value) style.setProperty(p, b.value, b.priority);
+      else style.removeProperty(p);
+      rec.styleBackup.delete(p);
+    }
+    this.noteStyle(rec.root);
+  }
+
+  private restoreStyle(rec: MaskRecord) {
+    const style = (rec.root as HTMLElement).style as CSSStyleDeclaration | undefined;
+    if (!style || rec.styleBackup.size === 0) return;
+    for (const [p, b] of rec.styleBackup) {
+      if (b.value) style.setProperty(p, b.value, b.priority);
+      else style.removeProperty(p);
+    }
+    rec.styleBackup.clear();
+    if (rec.prev.style === null && rec.root.getAttribute('style') === '') rec.root.removeAttribute('style');
+    this.noteStyle(rec.root);
+  }
+
+  /** Record the style attribute as ours, so the guard does not treat it as a page edit. */
+  private noteStyle(el: Element) {
+    let m = this.expectedAttr.get(el);
+    if (!m) {
+      m = new Map();
+      this.expectedAttr.set(el, m);
+    }
+    m.set('style', el.getAttribute('style'));
   }
 
   /**
@@ -354,7 +611,10 @@ export class Masker {
       }
     }
     this.splitOwner.delete(split.original);
-    if (stale) rec.stale = true;
+    if (stale) {
+      rec.stale = true;
+      this.pendingStale.add(rec.id);
+    }
   }
 
   /** Drop a node from this record's bookkeeping, without touching the DOM. */
@@ -380,6 +640,7 @@ export class Masker {
   }
 
   private maskText(rec: MaskRecord, t: Text) {
+    this.watchRoot(t);
     if (!rec.texts.has(t)) rec.texts.set(t, t.data);
     const masked = bullets(t.data);
     if (t.data !== masked) this.writeText(t, masked);
@@ -410,6 +671,7 @@ export class Masker {
    */
   private onMutations(records: MutationRecord[]) {
     if (this.records.size === 0) return;
+    const removedEls: Array<{ r: MutationRecord; n: Element }> = [];
     for (const r of records) {
       if (r.type === 'characterData') {
         const t = r.target as Text;
@@ -433,6 +695,20 @@ export class Masker {
         const added = Array.from(r.addedNodes).filter((n) => !this.ownNodes.has(n));
         if (removed.length === 0 && added.length === 0) continue; // our own split or merge
         for (const n of removed) {
+          if (n.nodeType === Node.ELEMENT_NODE) {
+            removedEls.push({ r, n: n as Element });
+            // Split nodes inside a removed element are gone with it. Every
+            // text node counts: a split's original is often left empty.
+            const walker = document.createTreeWalker(n, NodeFilter.SHOW_TEXT);
+            const seen = new Set<SplitRecord>();
+            for (let t = walker.nextNode(); t; t = walker.nextNode()) {
+              const owner = this.splitOwner.get(t as Text);
+              if (!owner || seen.has(owner.split)) continue;
+              seen.add(owner.split);
+              this.unsplit(owner.rec, owner.split, false, true);
+            }
+            continue;
+          }
           if (n.nodeType !== Node.TEXT_NODE) continue;
           const owner = this.splitOwner.get(n as Text);
           if (owner) this.unsplit(owner.rec, owner.split, false, true);
@@ -454,20 +730,131 @@ export class Masker {
         const expected = this.expectedAttr.get(el)?.get(attr);
         const current = el.getAttribute(attr);
         if (expected !== undefined && expected === current) continue; // ours
-        if (attr === 'aria-hidden' && el === rec.root && !rec.subset && current !== 'true') {
-          this.writeAttr(el, 'aria-hidden', 'true');
-        } else if (attr === MASK_ATTR && el === rec.root && !rec.subset) {
-          const want = rec.mode === 'text' ? 'text' : rec.mode === 'input' ? (rec.peeking ? 'input-peek' : 'input') : 'visual';
-          if (current !== want) this.writeAttr(el, MASK_ATTR, want);
-        } else if (SCRUB_ATTRS.includes(attr) && current) {
+        const backup = () => {
           let m = rec.attrs.get(el);
           if (!m) {
             m = new Map();
             rec.attrs.set(el, m);
           }
           m.set(attr, current);
+        };
+        if (attr === 'aria-hidden' && el === rec.root && !rec.subset && current !== 'true') {
+          this.writeAttr(el, 'aria-hidden', 'true');
+        } else if (attr === MASK_ATTR && el === rec.root && !rec.subset) {
+          const want = rec.mode === 'text' ? 'text' : rec.mode === 'input' ? (rec.peeking ? 'input-peek' : 'input') : 'visual';
+          if (current !== want) this.writeAttr(el, MASK_ATTR, want);
+        } else if (attr === 'style' && el === rec.root) {
+          this.enforceStyle(rec);
+        } else if (attr === 'value' && el === rec.root && rec.mode === 'input' && isValueModeInput(el)) {
+          // A framework syncing the default (React does): take it as the new default, blank again.
+          if (current) {
+            backup();
+            el.value = el.value;
+            this.writeAttr(el, 'value', '');
+          }
+        } else if ((attr === 'src' || attr === 'srcset') && rec.mode === 'visual-only' && mediaSources(rec.root).includes(el)) {
+          if (current !== null && !(attr === 'src' && current === PLACEHOLDER_SRC)) {
+            backup();
+            this.scrubMediaAttrs(rec, el);
+          }
+        } else if (SCRUB_ATTRS.includes(attr) && current) {
+          backup();
+          this.writeAttr(el, attr, '');
+        } else if (current && tokenScrubbable(el, attr) && leaks(current, this.tokens(rec))) {
+          backup();
           this.writeAttr(el, attr, '');
         }
+      }
+    }
+    this.rebindReplaced(removedEls);
+    this.flushStale();
+  }
+
+  /**
+   * A framework re-rendering the parent replaces a masked root with a fresh,
+   * raw copy. Waiting for the resolver (a debounced batch, then an async
+   * re-resolve) leaves that copy readable for tens of milliseconds, which is
+   * plenty for an agent polling the page. When the replacement sits in the
+   * same slot of the same mutation record with the same tag (and id) at every
+   * step down to the root, it is the same thing re-rendered: move the mask now,
+   * in this callback, before any other task runs.
+   */
+  private rebindReplaced(removedEls: Array<{ r: MutationRecord; n: Element }>) {
+    if (removedEls.length === 0) return;
+    const done = new Set<string>();
+    for (const { r, n } of removedEls) {
+      for (const rec of Array.from(this.records.values())) {
+        if (done.has(rec.id) || rec.root.isConnected) continue;
+        if (n !== rec.root && !n.contains(rec.root)) continue;
+        const twin = this.findTwin(rec, n, r);
+        if (!twin || this.byRoot.has(twin)) continue;
+        done.add(rec.id);
+        if (rec.subset) {
+          this.pendingStale.delete(rec.id);
+          this.restore(rec.id);
+        } else {
+          this.apply(rec.id, twin, rec.mode);
+        }
+        try {
+          this.onRebind?.(rec.id, twin);
+        } catch (e) {
+          console.error('[aibs] rebind failed', e);
+        }
+      }
+    }
+  }
+
+  /**
+   * The page's fresh copy of `rec.root` among the nodes `r` added in place of
+   * `removed`: same tag (and id) at every step of the path down from
+   * `removed`, AND the same content as the root had before masking. The slot
+   * is tried first, then every other added sibling; a copy is accepted only
+   * when exactly one candidate matches, so a shifted or deleted row never
+   * hands its mask to a neighbour.
+   */
+  private findTwin(rec: MaskRecord, removed: Element, r: MutationRecord): Element | null {
+    const same = (a: Node | null | undefined, b: Element): a is Element =>
+      !!a && a.nodeType === Node.ELEMENT_NODE && (a as Element).tagName === b.tagName && (a as Element).id === b.id;
+    const path: number[] = [];
+    const tags: Element[] = [];
+    for (let cur: Element = rec.root; cur !== removed; ) {
+      const p = cur.parentElement;
+      if (!p) return null;
+      path.unshift(Array.prototype.indexOf.call(p.children, cur) as number);
+      tags.unshift(cur);
+      cur = p;
+    }
+    const follow = (top: Node): Element | null => {
+      if (!same(top, removed) || !top.isConnected) return null;
+      let cand: Element = top;
+      for (let k = 0; k < path.length; k++) {
+        const next: Element | undefined = cand.children[path[k]];
+        if (!same(next, tags[k])) return null;
+        cand = next;
+      }
+      return signatureOf(cand, rec.mode) === rec.signature ? cand : null;
+    };
+    const idx = Array.prototype.indexOf.call(r.removedNodes, removed) as number;
+    const slot = r.addedNodes[idx];
+    const first = slot ? follow(slot) : null;
+    if (first) return first;
+    const hits = Array.from(r.addedNodes)
+      .filter((a) => a !== slot)
+      .map(follow)
+      .filter((e): e is Element => !!e);
+    return hits.length === 1 ? hits[0] : null;
+  }
+
+  private flushStale() {
+    if (this.pendingStale.size === 0) return;
+    const ids = Array.from(this.pendingStale);
+    this.pendingStale.clear();
+    for (const id of ids) {
+      if (!this.records.get(id)?.stale) continue;
+      try {
+        this.onStale?.(id);
+      } catch (e) {
+        console.error('[aibs] re-mask failed', e);
       }
     }
   }
