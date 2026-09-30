@@ -82,6 +82,8 @@ private scheduleSave() {
 
 Keep `assertNoCoveredText` as a unit-test assertion over fixtures (`tests/unit/privacy.test.ts`), where a throw is the desired outcome.
 
+**Resolution (2026-09-30):** Fixed. Scopes and iframe URL patterns are sanitised at creation, saves drop only the offending sticker, and failures surface in the popup and badge. See Resolutions below.
+
 ---
 
 ## Medium
@@ -103,6 +105,8 @@ window.addEventListener('mousemove', (e) => { if (e.isTrusted) pointer = { x: e.
 ```
 
 Apply the same guard to every listener that changes protection state: `contextmenu` (L3), the picker and rect-draw (if they listen on `window` or `document`), and `focusin`.
+
+**Resolution (2026-09-30):** Already fixed by the red-team pass (`isTrusted` checks in `peek.ts` keydown and the `index.ts` pointer tracker); verified.
 
 ### M2. Raw attribute values of the covered element are stored
 
@@ -126,6 +130,8 @@ if (fp[k] && normalizeContext(el.getAttribute(attr)) === fp[k]) s += W.attr;
 ```
 
 Alternatively, pre-compute `ariaLabelHmac` with `textHmacOf` during resolution, which already runs async for `textHmac`. Apply `isStableId`-style filtering to `testId` wherever it enters `cssPath`.
+
+**Resolution (2026-09-30):** Fixed. Attributes are normalised or HMACed before storage, and the resolver matches either form. See Resolutions below.
 
 ### M3. The background trusts any extension sender and never validates the origin string
 
@@ -173,6 +179,8 @@ case 'ENABLE_ORIGIN': {
 
 `reconcile()` should also run `parseOrigin` on `s.origin` read from storage, because storage is writable by content scripts (see L6).
 
+**Resolution (2026-09-30):** Fixed. Only extension pages (not content scripts) may enable/disable origins, origins are strictly validated, and every path answers `{ ok: false, error }` on failure. See Resolutions below.
+
 ### M4. Script ids collide, so enabling one site can silently drop protection on another
 
 **Where:** `src/entrypoints/background.ts:8-10`: `'aibs-' + origin.replace(/[^a-z0-9]/gi, '_')`.
@@ -188,6 +196,8 @@ function scriptId(origin: string): string {
 ```
 
 On upgrade, `reconcile()` should unregister any `aibs-*` id that is no longer produced by an enabled site. You can list them with `getRegisteredContentScripts()`.
+
+**Resolution (2026-09-30):** Fixed. Script ids hash the full origin (FNV-1a) and `reconcile()` unregisters every id it did not just register. See Resolutions below.
 
 ---
 
@@ -211,6 +221,8 @@ if (!document.adoptedStyleSheets.includes(sheet)) document.adoptedStyleSheets = 
 // guard.ts: in the slow tick, if (observedRoot !== document.documentElement) { mo.disconnect(); mo.observe(document.documentElement, opts); }
 ```
 
+**Resolution (2026-09-30):** Fixed. Masks were already inline `!important` and re-applied by the guard; the mask sheet now re-installs itself and the observer re-binds after `<html>` is replaced. See Resolutions below.
+
 ### L2. Input-mode masks leave `.value` readable in the page world
 
 **Where:** `src/content/mask/masker.ts:285-292`.
@@ -220,6 +232,8 @@ For input mode the mask sets `-webkit-text-security` (visual only), `tabindex=-1
 ### L3. A synthetic `contextmenu` event can retarget "Cover this element"
 
 **Where:** `src/content/index.ts:272-279`. A page can listen for the user's right-click and immediately dispatch a synthetic `contextmenu` on a decoy element. `contextTarget` then points at the decoy, and the menu covers the wrong element. **Fix:** `if (!e.isTrusted) return;`.
+
+**Resolution (2026-09-30):** Fixed. Untrusted `contextmenu` events are ignored.
 
 ### L4. Length-preserving bullets and stored `textLen` leak the length and shape of the secret
 
@@ -233,11 +247,15 @@ For input mode the mask sets `-webkit-text-security` (visual only), `tabindex=-1
 
 The card is `aria-hidden`, has `pointer-events:none`, and lives in a **closed** shadow root inside an `aria-hidden` host. Page scripts cannot reach it: `el.shadowRoot` is null, `elementFromPoint` and `caretRangeFromPoint` retarget to `aibs-host`, and a document select-all does not cross the shadow boundary. Two gaps remain. `.peek-card` does not set `user-select:none`, so keyboard selection APIs have nothing explicit stopping them. And an agent using CDP `DOM.getDocument({pierce:true})` or `DOMSnapshot` can read closed shadow roots. The card only exists while the user holds the peek keys, so the exposure is tiny. **Fix:** add `user-select:none; -webkit-user-select:none;` to `.peek-card`. Keep removing cards on `end()`, which the code already does.
 
+**Resolution (2026-09-30):** Fixed. `.peek-card` sets `user-select:none` and `-webkit-user-select:none`.
+
 ### L6. Every content script can read all sites' records and the HMAC key
 
 **Where:** `src/content/state/store.ts:15-24`, `:37-39` and `src/content/index.ts:81-85`.
 
 Content scripts read `chrome.storage.local` directly, which covers every `site:*` record and `secret.hmacKey`. `storage.onChanged` also delivers every site's changes to every content script. If one origin's isolated world were compromised, it could read the structure of every protected site and the key needed to brute-force `textHmac`. **Fix (defense in depth):** move the HMAC key and cross-site reads behind the background, for example `GET_SITE` with the origin taken from `sender.origin` and never from the message body, and `HMAC` requests. Then call `chrome.storage.local.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' })` if the targeted Chrome version supports it for `local`. This does cost the "no service-worker round trip before first paint" property that `store.ts:5-10` relies on, so it is a trade-off, not a free fix.
+
+**Resolution (2026-09-30):** Accepted risk. Content scripts share `chrome.storage.local` with the rest of the extension in MV3; moving reads behind the service worker would cost first-paint masking.
 
 ---
 
@@ -261,3 +279,15 @@ Content scripts read `chrome.storage.local` directly, which covers every `site:*
 5. **Label, heading and column context** is stored lowercased, with digits and punctuation stripped, capped at 40 characters. It can still contain words such as a person's name next to a field.
 6. **User-entered sticker labels** are stored and drawn as written. The UI warns users to keep them non-sensitive.
 7. **Screenshots taken while the user is actively peeking** will show the originals. That is by design.
+
+## Resolutions (2026-09-30)
+
+- **H1** (a) `src/shared/url-match.ts`: new `sanitizePathPattern` replaces every id-like segment and every segment with a run of 4+ digits with `*`; `defaultPathPattern` and `prefixPathPattern` use it. `src/content/state/session.ts`: `frameInfo()` stores `frame.urlPattern` as origin + generalised path; `setScope()` sanitises the incoming pattern; `src/entrypoints/popup/main.ts:scopeOptions` offers the sanitised exact path. (b) `src/shared/storage.ts`: `sanitizeForSave()` checks each sticker on its own and leaves a failing one out of the stored copy with a warning; `saveSite()` returns `{ dropped }`. `src/content/state/store.ts:flush()` never rejects: it keeps the in-memory record, logs once, and sets `saveError`, reported through `onSaveStatus` → `TAB_STATUS` (`TabState.saveError`, `src/content/index.ts`). `src/entrypoints/background.ts:setTabState` shows badge `!`; the popup shows "Could not save stickers on this site". Tests: `tests/unit/privacy.test.ts` (H1 block), `tests/unit/url-match.test.ts`.
+- **M1** Verified already fixed: `src/content/overlay/peek.ts` keydown and `src/content/index.ts` mousemove check `isTrusted`.
+- **M2** `src/content/anchor/fingerprint.ts:buildFingerprint`: `ariaLabel`/`placeholder` go through `normalizeContext`; `id`, `testId`, `name` are kept raw only when `isIdentifierLike` (`^[A-Za-z_][\w-]{0,40}$`, no 4+ digit run, in `selector.ts`), otherwise stored as `idHmac`/`testIdHmac`/`nameHmac` (`attrHmacOf`, exact value, domain-separated); `type`/`role` only when keyword-shaped. `src/content/anchor/selector.ts:buildCssPath/segmentFor` embed ids, test ids and names only when identifier-like, and use the test-id attribute actually present. `src/content/anchor/resolve.ts:resolveFingerprint` finds candidates by HMAC and matches raw or HMAC, normalised or legacy raw. `storage.ts:HMAC_KEYS` covers the new fields. Tests: `tests/unit/resolve.test.ts` (M2 block).
+- **M3** `src/shared/origin.ts:parseOrigin` (http/https, `url.origin === origin`, no path/query/credentials/wildcard host). `src/entrypoints/background.ts` `ENABLE_ORIGIN`/`DISABLE_ORIGIN` require `fromExtensionPage` (`sender.id === chrome.runtime.id`, no `sender.tab`), check host permission, and always answer `{ ok, error? }`; `GET_TAB_STATE` gets the same sender gate; `reconcile()` and `permissions.onRemoved` validate stored origins. The popup shows the error. Tests: `tests/unit/origin.test.ts`.
+- **M4** `src/shared/origin.ts:scriptId` = `aibs-v2-<sanitised host>-<FNV-1a(origin) base36>`. `background.ts:reconcile()` unregisters every registered id it did not just register, which migrates old-scheme ids. Tests: `tests/unit/origin.test.ts`.
+- **L1** Confirmed: `src/content/mask/masker.ts:wantedStyles/enforceStyle` already force `-webkit-text-security` and `visibility:hidden` inline `!important` and re-apply them on style mutations (e2e test 13). New: `src/content/mask/sheet.ts:ensureMaskSheet` re-adopts the sheet (or re-appends the `<style>` fallback), called on every mutation and from a 250 ms visibility-independent watchdog in `Masker.start`; `src/content/mask/guard.ts:MutationHub.ensureRoot` re-binds the observer (and shadow roots) if `<html>` is replaced. New e2e test `13b` in `tests/e2e/redteam.spec.ts`.
+- **L3** `src/content/index.ts` contextmenu listener returns early on `!e.isTrusted`.
+- **L5** `src/content/overlay/styles.css` `.peek-card`: `user-select:none; -webkit-user-select:none`.
+- **L6** Accepted risk: inherent to MV3 content scripts sharing extension storage; see L6 for the trade-off.

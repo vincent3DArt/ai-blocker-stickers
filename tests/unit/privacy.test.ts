@@ -1,6 +1,8 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { assertNoCoveredText } from '@/shared/storage';
+import { assertNoCoveredText, saveSite, siteKey } from '@/shared/storage';
+import { SiteStore } from '@/content/state/store';
+import { defaultPathPattern } from '@/shared/url-match';
 import type { ElementSticker, Fingerprint, SiteRecord } from '@/shared/types';
 
 const anchor: Fingerprint = {
@@ -50,5 +52,65 @@ describe('privacy invariant', () => {
   it('rejects a raw account number that leaked into a label', () => {
     const bad = { ...sticker, label: 'acct 9876543210' };
     expect(() => assertNoCoveredText(record(bad))).toThrow(/Privacy invariant/);
+  });
+});
+
+/** Minimal chrome.storage mock; `set` can be told to fail. */
+function mockChrome(opts: { failSet?: boolean } = {}) {
+  const data: Record<string, unknown> = {};
+  const set = vi.fn(async (items: Record<string, unknown>) => {
+    if (opts.failSet) throw new Error('QUOTA_BYTES quota exceeded');
+    Object.assign(data, JSON.parse(JSON.stringify(items)));
+  });
+  (globalThis as unknown as { chrome: unknown }).chrome = {
+    storage: {
+      local: { set, get: vi.fn(async (k: string) => (k in data ? { [k]: data[k] } : {})) },
+      onChanged: { addListener: vi.fn(), removeListener: vi.fn() },
+    },
+  };
+  return { data, set };
+}
+
+describe('H1: saving never trips over a record id', () => {
+  afterEach(() => {
+    delete (globalThis as unknown as { chrome?: unknown }).chrome;
+    vi.restoreAllMocks();
+  });
+
+  it('a path with a 9-digit account id in a middle segment yields a storable scope', () => {
+    const pattern = defaultPathPattern('/accounts/123456789/tx');
+    expect(pattern).toBe('/accounts/*/tx');
+    const frameUrl = 'https://bank.example' + defaultPathPattern('/embed/100200300/frame/C0001234');
+    expect(frameUrl).toBe('https://bank.example/embed/*/frame/*');
+    const s = { ...sticker, scope: { pathPattern: pattern }, frame: { depth: 1, urlPattern: frameUrl } };
+    expect(() => assertNoCoveredText(record(s))).not.toThrow();
+  });
+
+  it('a record with one bad sticker still persists the good ones', async () => {
+    const { data } = mockChrome();
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const bad: ElementSticker = { ...sticker, id: 'bad', anchor: { ...anchor, cssPath: 'td[data-testid="row-123456789"]' } };
+    const good: ElementSticker = { ...sticker, id: 'good' };
+    const rec: SiteRecord = { ...record(good), stickers: [bad, good] };
+    const { dropped } = await saveSite(rec);
+    expect(dropped).toEqual(['bad']);
+    const stored = data[siteKey(rec.origin)] as SiteRecord;
+    expect(stored.stickers.map((s) => s.id)).toEqual(['good']);
+  });
+
+  it('SiteStore.flush keeps the record in memory and raises saveError instead of rejecting', async () => {
+    mockChrome({ failSet: true });
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const store = await SiteStore.open('https://example.test');
+    const seen: boolean[] = [];
+    store.onSaveStatus = (e) => seen.push(e);
+    store.upsert({ ...sticker, id: 'a' });
+    await expect(store.flush()).resolves.toBe(false);
+    await store.flush();
+    expect(store.saveError).toBe(true);
+    expect(store.all.map((s) => s.id)).toEqual(['a']);
+    expect(seen).toEqual([true]);
+    expect(err).toHaveBeenCalledTimes(1); // logged once, not per save
+    store.destroy();
   });
 });

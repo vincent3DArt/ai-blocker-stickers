@@ -12,21 +12,43 @@ const CSS = `
 [${MASK_ATTR}="visual"] { visibility: hidden !important; }
 `;
 
-let installed = false;
+let sheet: CSSStyleSheet | null = null;
+let style: HTMLStyleElement | null = null;
 
 export function installMaskSheet() {
-  if (installed) return;
-  installed = true;
-  try {
-    const sheet = new CSSStyleSheet();
-    sheet.replaceSync(CSS);
-    document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet];
-    return;
-  } catch {
-    /* fall through */
-  }
-  const style = document.createElement('style');
-  style.setAttribute('data-aibs', '');
-  style.textContent = CSS;
-  (document.head ?? document.documentElement).appendChild(style);
+  ensureMaskSheet();
 }
+
+/**
+ * Install the mask sheet, or put it back if the page took it away: a script
+ * can clear `document.adoptedStyleSheets`, remove our `<style>`, or replace
+ * `<html>` wholesale. Cheap enough to call on every mutation batch and on a
+ * timer. The properties that actually hide content are also set inline
+ * `!important` by the masker; this sheet adds the rest (user-select) and is
+ * the first line of defence before the inline styles land.
+ */
+export function ensureMaskSheet() {
+  if (!style) {
+    try {
+      if (!sheet) {
+        sheet = new CSSStyleSheet();
+        sheet.replaceSync(CSS);
+      }
+      if (!document.adoptedStyleSheets.includes(sheet)) {
+        document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet];
+      }
+      return;
+    } catch {
+      sheet = null;
+      /* fall through to a <style> element */
+    }
+    style = document.createElement('style');
+    style.setAttribute('data-aibs', '');
+    style.textContent = CSS;
+  }
+  if (!style.isConnected || style.textContent !== CSS) {
+    style.textContent = CSS;
+    (document.head ?? document.documentElement).appendChild(style);
+  }
+}
+

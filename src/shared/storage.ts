@@ -17,15 +17,44 @@ export async function loadSite(origin: string): Promise<SiteRecord | undefined> 
 }
 
 /**
- * Writes the record verbatim. `updatedAt` is the caller's: the content script
- * compares it against the value in storage.onChanged to recognise its own
- * writes, and stamping a second, different timestamp here made every save look
- * like a remote edit and triggered a needless reload of the whole session.
+ * Splits a record into what may be persisted and what may not. Each sticker is
+ * checked on its own against the privacy guard, so one bad sticker (a raw id
+ * that slipped into a selector, say) is left out of the stored copy instead of
+ * blocking every other sticker on the site. The record-level fields are
+ * checked last; if they fail, the throw is the caller's to surface.
  */
-export async function saveSite(rec: SiteRecord): Promise<void> {
-  assertNoCoveredText(rec);
-  const record: SiteRecord = { ...rec, updatedAt: rec.updatedAt || Date.now() };
+export function sanitizeForSave(rec: SiteRecord): { rec: SiteRecord; dropped: string[] } {
+  const dropped: string[] = [];
+  const stickers = rec.stickers.filter((s) => {
+    try {
+      assertNoCoveredText({ ...rec, stickers: [s] });
+      return true;
+    } catch (e) {
+      console.warn('[aibs] sticker left out of storage by the privacy guard', s.id, (e as Error).message);
+      dropped.push(s.id);
+      return false;
+    }
+  });
+  const safe: SiteRecord = { ...rec, stickers };
+  assertNoCoveredText(safe);
+  return { rec: safe, dropped };
+}
+
+/**
+ * Writes the record, minus any sticker the privacy guard rejects (their ids
+ * are returned). `updatedAt` is the caller's: the content script compares it
+ * against the value in storage.onChanged to recognise its own writes, and
+ * stamping a second, different timestamp here made every save look like a
+ * remote edit and triggered a needless reload of the whole session.
+ *
+ * Throws only when the record itself (not one sticker) fails the guard, or
+ * when storage rejects the write.
+ */
+export async function saveSite(rec: SiteRecord): Promise<{ dropped: string[] }> {
+  const { rec: safe, dropped } = sanitizeForSave(rec);
+  const record: SiteRecord = { ...safe, updatedAt: safe.updatedAt || Date.now() };
   await chrome.storage.local.set({ [siteKey(record.origin)]: record });
+  return { dropped };
 }
 
 export async function listSites(): Promise<SiteRecord[]> {
@@ -69,7 +98,7 @@ const LEAK_PATTERNS = [/\b\d{3}[- ]\d{2}[- ]\d{4}\b/, /\b\d{2}-\d{7}\b/, /\b\d{9
  * timestamp, a length or a layout coordinate (an epoch in milliseconds is 13
  * digits, and matching it here used to abort every single save).
  */
-const HMAC_KEYS = new Set(['textHmac', 'keyHmac']);
+const HMAC_KEYS = new Set(['textHmac', 'keyHmac', 'idHmac', 'testIdHmac', 'nameHmac']);
 
 export function assertNoCoveredText(rec: SiteRecord): void {
   const visit = (value: unknown, path: string): void => {

@@ -165,6 +165,10 @@ export async function boot() {
   let rectDraw: RectDraw | null = null;
   let reattachId: string | null = null;
   const toolbar = new Toolbar(host, { onAction: (a) => onToolbar(a) });
+  store.onSaveStatus = (error) => {
+    sendState({ saveError: error });
+    if (error && depth === 0) toolbar.toast('Could not save stickers on this site');
+  };
 
   function stopTools() {
     picker?.stop();
@@ -273,8 +277,12 @@ export async function boot() {
   window.addEventListener(
     'contextmenu',
     (e) => {
+      // A page can answer the user's right-click by dispatching its own
+      // contextmenu on a decoy; only the real one may aim "Cover this element".
+      if (!e.isTrusted) return;
       const t = e.target as Element | null;
       contextTarget = t && !isOurs(t) ? t : null;
+
     },
     true,
   );

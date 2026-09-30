@@ -1,8 +1,8 @@
 import type { Confidence, Fingerprint } from '@/shared/types';
-import { evalXPath, queryAll, stableClasses, testId } from './selector';
-import { elementsNearLabel, labelInfo, tableContext } from './context';
+import { TEST_ID_ATTRS, evalXPath, isIdentifierLike, queryAll, stableClasses, testId } from './selector';
+import { elementsNearLabel, labelInfo, normalizeContext, tableContext } from './context';
 import { center, distance, isRendered, toViewRect, viewToDoc } from './geometry';
-import { KEY_ATTR_SELECTOR, fingerprintText, keyAttrOf, textHmacOf } from './fingerprint';
+import { KEY_ATTR_SELECTOR, attrHmacOf, fingerprintText, keyAttrOf, textHmacOf } from './fingerprint';
 
 export interface Resolution {
   el: Element;
@@ -50,8 +50,11 @@ const NO_IDENTITY_FACTOR = 0.6;
 function hasIdentity(fp: Fingerprint): boolean {
   return !!(
     fp.id ||
+    fp.idHmac ||
     fp.testId ||
+    fp.testIdHmac ||
     fp.name ||
+    fp.nameHmac ||
     fp.textHmac ||
     fp.keyHmac ||
     (fp.labelContext && fp.labelSource && fp.labelSource !== 'column')
@@ -104,6 +107,31 @@ export async function resolveFingerprint(fp: Fingerprint, opts: ResolveOptions =
   evalXPath(fp.xpath).forEach((e) => candidates.add(e));
   if (fp.name) queryAll(`${fp.tag}[name="${CSS.escape(fp.name)}"]`).forEach((e) => candidates.add(e));
   if (fp.labelContext) elementsNearLabel(fp.labelContext, fp.tag).forEach((e) => candidates.add(e));
+
+  // Exact-match attributes stored as HMACs (values that were not
+  // identifier-like). Memoised per raw value for this pass; only values that
+  // would themselves have been hashed are hashed, so the cost stays bounded.
+  const attrCache = new Map<string, Promise<string | undefined>>();
+  const attrHmac = (v: string | null | undefined): Promise<string | undefined> => {
+    if (!v || isIdentifierLike(v)) return Promise.resolve(undefined);
+    let p = attrCache.get(v);
+    if (!p) {
+      p = attrHmacOf(v);
+      attrCache.set(v, p);
+    }
+    return p;
+  };
+  const addByHmac = async (selector: string, want: string, read: (e: Element) => string | null | undefined) => {
+    const els = queryAll(selector).slice(0, 1000);
+    await Promise.all(
+      els.map(async (e) => {
+        if ((await attrHmac(read(e))) === want) candidates.add(e);
+      }),
+    );
+  };
+  if (fp.idHmac) await addByHmac(`${fp.tag}[id]`, fp.idHmac, (e) => e.id);
+  if (fp.testIdHmac) await addByHmac(TEST_ID_ATTRS.map((a) => `${fp.tag}[${a}]`).join(','), fp.testIdHmac, testId);
+  if (fp.nameHmac) await addByHmac(`${fp.tag}[name]`, fp.nameHmac, (e) => e.getAttribute('name'));
 
   // HMAC of a record key, memoised per raw value for this resolve pass.
   const keyCache = new Map<string, Promise<string | undefined>>();
@@ -167,11 +195,12 @@ export async function resolveFingerprint(fp: Fingerprint, opts: ResolveOptions =
   for (const el of list) {
     let s = 0;
     let identityMatched = false;
-    if (fp.id && el.id === fp.id) {
+    if ((fp.id && el.id === fp.id) || (fp.idHmac && (await attrHmac(el.id)) === fp.idHmac)) {
       s += W.id;
       identityMatched = true;
     }
-    if (fp.testId && testId(el) === fp.testId) {
+    const tid = testId(el);
+    if ((fp.testId && tid === fp.testId) || (fp.testIdHmac && (await attrHmac(tid)) === fp.testIdHmac)) {
       s += W.testId;
       identityMatched = true;
     }
@@ -206,18 +235,27 @@ export async function resolveFingerprint(fp: Fingerprint, opts: ResolveOptions =
       if (tc?.colIndex === fp.tableContext.colIndex && tc?.rowIndex === fp.tableContext.rowIndex) s += 3;
     }
     s += W.classes * jaccard(fp.classes, stableClasses(el));
+    const elName = el.getAttribute('name');
+    if ((fp.name && elName === fp.name) || (fp.nameHmac && (await attrHmac(elName)) === fp.nameHmac)) {
+      s += W.attr;
+      identityMatched = true;
+    }
     for (const [k, attr] of [
-      ['name', 'name'],
       ['type', 'type'],
       ['role', 'role'],
+    ] as const) {
+      if (fp[k] && el.getAttribute(attr) === fp[k]) s += W.attr;
+    }
+    // Stored normalised (current records) or raw (records from before the
+    // normalisation): accept either form.
+    for (const [k, attr] of [
       ['ariaLabel', 'aria-label'],
       ['placeholder', 'placeholder'],
     ] as const) {
-      if (fp[k] && el.getAttribute(attr) === fp[k]) {
-        s += W.attr;
-        if (k === 'name') identityMatched = true;
-      }
+      const v = el.getAttribute(attr);
+      if (fp[k] && v && (normalizeContext(v) === fp[k] || v.slice(0, 60) === fp[k])) s += W.attr;
     }
+
     if (isRendered(el)) {
       const c = center(viewToDoc(toViewRect(el.getBoundingClientRect())));
       const d = distance({ x: storedCenter.x * scaleX, y: storedCenter.y }, c);

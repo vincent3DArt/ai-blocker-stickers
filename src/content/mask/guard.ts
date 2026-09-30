@@ -13,6 +13,10 @@ const OPTIONS: MutationObserverInit = {
  */
 export class MutationHub {
   private mo: MutationObserver | null = null;
+  /** The element the observer is bound to; a page can replace `<html>`. */
+  private observedRoot: Element | null = null;
+  /** Shadow roots to re-observe if the observer has to be re-bound. */
+  private roots = new Set<Node>();
   private sync = new Set<(records: MutationRecord[]) => void>();
   private batches = new Map<() => void, { delay: number; timer: number }>();
   /** Shadow roots observed on top of the document (masked content lives inside them). */
@@ -21,7 +25,25 @@ export class MutationHub {
   start() {
     if (this.mo) return;
     this.mo = new MutationObserver((records) => this.dispatch(records));
-    this.mo.observe(document.documentElement, OPTIONS);
+    this.observedRoot = document.documentElement;
+    this.mo.observe(this.observedRoot, OPTIONS);
+  }
+
+  /**
+   * Re-bind the observer if the page swapped `document.documentElement`
+   * (`document.replaceChild(newHtml, oldHtml)`): the old binding would
+   * silently watch a detached tree. Returns true when it had to re-bind.
+   */
+  ensureRoot(): boolean {
+    if (!this.mo || this.observedRoot === document.documentElement || !document.documentElement) return false;
+    this.mo.disconnect();
+    this.observedRoot = document.documentElement;
+    this.mo.observe(this.observedRoot, OPTIONS);
+    for (const r of this.roots) {
+      if (r.isConnected) this.mo.observe(r, OPTIONS);
+      else this.roots.delete(r);
+    }
+    return true;
   }
 
   /**
@@ -32,13 +54,17 @@ export class MutationHub {
   observe(root: Node) {
     if (!this.mo || this.extra.has(root)) return;
     this.extra.add(root);
+    this.roots.add(root);
     this.mo.observe(root, OPTIONS);
   }
 
   stop() {
     this.mo?.disconnect();
     this.mo = null;
+    this.observedRoot = null;
     this.extra = new WeakSet();
+    this.roots.clear();
+
     for (const b of this.batches.values()) clearTimeout(b.timer);
     this.batches.clear();
   }

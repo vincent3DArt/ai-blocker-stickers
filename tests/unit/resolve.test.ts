@@ -95,3 +95,43 @@ describe('resolveFingerprint: identity beats position', () => {
     expect(res?.el).toBe(document.getElementById('client-ssn'));
   });
 });
+
+describe('M2: attribute values are never stored raw unless identifier-like', () => {
+  beforeAll(async () => {
+    polyfill();
+    setFingerprintKey(await importKey(randomKeyB64()));
+  });
+
+  const markup = `
+    <form><div>
+      <input class="field" name="user.jane@example.com" data-testid="row-123456789"
+        aria-label="Email jane.doe@example.com" placeholder="sk-live-4f9a1234" value="x">
+      <input class="field" name="other" data-testid="row-2" value="y">
+    </div></form>`;
+
+  it('normalises aria-label/placeholder, hashes data-like test ids and names, and still resolves', async () => {
+    document.body.innerHTML = markup;
+    const el = document.querySelector<HTMLInputElement>('[data-testid="row-123456789"]')!;
+    const fp = await buildFingerprint(el);
+    const json = JSON.stringify(fp);
+    for (const leak of ['jane.doe', 'jane@', '123456789', '4f9a1234', 'example.com']) expect(json, leak).not.toContain(leak);
+    expect(fp.testId).toBeUndefined();
+    expect(fp.testIdHmac).toMatch(/^[0-9a-f]{64}$/);
+    expect(fp.name).toBeUndefined();
+    expect(fp.nameHmac).toMatch(/^[0-9a-f]{64}$/);
+    expect(fp.ariaLabel).toBe('email jane doe example com');
+    expect(fp.placeholder).toBe('sk live f a');
+
+    // Re-render: a fresh node with the same attributes is found through the HMACs.
+    document.body.innerHTML = markup;
+    const res = await resolveFingerprint(fp);
+    expect(res?.el).toBe(document.querySelector('[data-testid="row-123456789"]'));
+  });
+
+  it('keeps identifier-like values raw', async () => {
+    document.body.innerHTML = `<input id="ssn" name="ssn" data-testid="ssn-input" type="text">`;
+    const fp = await buildFingerprint(document.getElementById('ssn')!);
+    expect(fp).toMatchObject({ id: 'ssn', name: 'ssn', testId: 'ssn-input', type: 'text' });
+    expect(fp.idHmac ?? fp.nameHmac ?? fp.testIdHmac).toBeUndefined();
+  });
+});

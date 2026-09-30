@@ -37,14 +37,36 @@ export function stableClasses(el: Element, max = 5): string[] {
   return Array.from(el.classList).filter(isStableClass).slice(0, max);
 }
 
-const TEST_ID_ATTRS = ['data-testid', 'data-test', 'data-cy', 'data-qa'];
+export const TEST_ID_ATTRS = ['data-testid', 'data-test', 'data-cy', 'data-qa'] as const;
 
 export function testId(el: Element): string | undefined {
+  return testIdAttr(el)?.value;
+}
+
+/** The first test-id attribute on `el`, with the attribute it came from. */
+export function testIdAttr(el: Element): { attr: string; value: string } | undefined {
   for (const a of TEST_ID_ATTRS) {
     const v = el.getAttribute(a);
-    if (v) return v;
+    if (v) return { attr: a, value: v };
   }
   return undefined;
+}
+
+const IDENTIFIER = /^[A-Za-z_][\w-]{0,40}$/;
+
+/**
+ * True for values that read like a developer's identifier (`email`,
+ * `ssn-input`, `row_name`) rather than data (`user-jdoe@x`, `row-123456789`,
+ * free text). Only those may be stored verbatim, in the fingerprint or inside
+ * `cssPath`; everything else is stored as an HMAC or not at all.
+ */
+export function isIdentifierLike(v: string | null | undefined): v is string {
+  return !!v && IDENTIFIER.test(v) && !/\d{4,}/.test(v);
+}
+
+/** `type` and `role` values are short lowercase keywords; anything else is not stored. */
+export function isKeyword(v: string | null | undefined): v is string {
+  return !!v && /^[a-z][a-z-]{0,23}$/i.test(v);
 }
 
 function cssEscape(s: string): string {
@@ -68,9 +90,9 @@ function segmentFor(el: Element, withNth: boolean): string {
   if (classes.length) seg += '.' + classes.map(cssEscape).join('.');
   if (tag === 'input' || tag === 'select' || tag === 'textarea' || tag === 'button') {
     const name = el.getAttribute('name');
-    if (name) seg += `[name="${cssEscape(name)}"]`;
+    if (isIdentifierLike(name)) seg += `[name="${cssEscape(name)}"]`;
     const type = el.getAttribute('type');
-    if (type) seg += `[type="${cssEscape(type)}"]`;
+    if (isKeyword(type)) seg += `[type="${cssEscape(type)}"]`;
   }
   if (withNth) seg += `:nth-of-type(${nthOfType(el)})`;
   return seg;
@@ -109,7 +131,7 @@ export function buildCssPath(el: Element, maxSegments = 8): string {
     chain.unshift(node);
     const id = node.id;
     const tid = testId(node);
-    if (node !== el && ((id && isStableId(id)) || tid)) break;
+    if (node !== el && ((isStableId(id) && isIdentifierLike(id)) || isIdentifierLike(tid))) break;
     if (node.tagName === 'BODY') break;
     node = node.parentElement;
   }
@@ -117,15 +139,17 @@ export function buildCssPath(el: Element, maxSegments = 8): string {
   for (let i = 0; i < chain.length; i++) {
     const n = chain[i];
     const id = n.id;
-    const tid = testId(n);
-    if (i === 0 && id && isStableId(id)) {
+    const tid = testIdAttr(n);
+    if (i === 0 && isStableId(id) && isIdentifierLike(id)) {
+
       segments.push(`#${cssEscape(id)}`);
       continue;
     }
-    if (i === 0 && tid) {
-      segments.push(`${n.tagName.toLowerCase()}[data-testid="${cssEscape(tid)}"]`);
+    if (i === 0 && tid && isIdentifierLike(tid.value)) {
+      segments.push(`${n.tagName.toLowerCase()}[${tid.attr}="${cssEscape(tid.value)}"]`);
       continue;
     }
+
     if (n.tagName === 'BODY') {
       segments.push('body');
       continue;

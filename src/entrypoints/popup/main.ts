@@ -1,7 +1,7 @@
 import type { GetStickersResponse, StickerSummary } from '@/shared/messages';
 import type { TabState } from '@/shared/types';
 import { loadSite, saveSite } from '@/shared/storage';
-import { defaultPathPattern, prefixPathPattern } from '@/shared/url-match';
+import { defaultPathPattern, prefixPathPattern, sanitizePathPattern } from '@/shared/url-match';
 
 const app = document.querySelector<HTMLDivElement>('#app')!;
 
@@ -51,6 +51,9 @@ async function render() {
   const content = granted ? await queryContent(tabId) : null;
 
   app.append(h('h1', {}, 'AI Blocker Stickers'), h('div', { class: 'origin' }, origin));
+  if (content?.state.saveError) {
+    app.append(h('p', { class: 'error' }, 'Could not save stickers on this site. They protect this page now but may not return after a reload.'));
+  }
 
   if (!granted || !content) {
     app.append(
@@ -62,11 +65,20 @@ async function render() {
           onclick: async () => {
             const ok = await chrome.permissions.request({ origins: [`${origin}/*`] });
             if (!ok) return;
-            const rec = (await loadSite(origin)) ?? { v: 1 as const, origin, enabled: true, stickers: [], updatedAt: 0 };
-            rec.enabled = true;
-            rec.updatedAt = Date.now();
-            await saveSite(rec);
-            await chrome.runtime.sendMessage({ type: 'ENABLE_ORIGIN', origin, tabId });
+            let res: { ok?: boolean; error?: string } | undefined;
+            try {
+              const rec = (await loadSite(origin)) ?? { v: 1 as const, origin, enabled: true, stickers: [], updatedAt: 0 };
+              rec.enabled = true;
+              rec.updatedAt = Date.now();
+              await saveSite(rec);
+              res = await chrome.runtime.sendMessage({ type: 'ENABLE_ORIGIN', origin, tabId });
+            } catch (e) {
+              res = { ok: false, error: String(e) };
+            }
+            if (!res?.ok) {
+              app.append(h('p', { class: 'error' }, `Could not enable this site: ${res?.error ?? 'no response'}`));
+              return;
+            }
             setTimeout(render, 300);
           },
         },
@@ -134,7 +146,10 @@ async function render() {
 
 /** Scope choices for a sticker: this exact page, its default pattern, its section, the whole site. */
 function scopeOptions(s: StickerSummary): string[] {
-  const exact = s.currentPath || '/';
+  // The exact path goes through the same sanitiser as every stored scope, so
+  // an account number in the URL is never offered (or stored) verbatim.
+  const exact = sanitizePathPattern(s.currentPath || '/');
+
   const out = [exact];
   for (const p of [defaultPathPattern(exact), prefixPathPattern(exact), '/**', s.pathPattern]) {
     if (!out.includes(p)) out.push(p);

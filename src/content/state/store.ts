@@ -12,6 +12,15 @@ export class SiteStore {
   private record: SiteRecord;
   private saveTimer = 0;
   private listeners = new Set<(rec: SiteRecord) => void>();
+  private saveErrorLogged = false;
+  /**
+   * True while the last save left something out of storage: a write that
+   * failed outright, or a sticker the privacy guard would not persist. The
+   * in-memory record is kept either way, so the page stays covered.
+   */
+  saveError = false;
+  /** Called whenever `saveError` changes. */
+  onSaveStatus: ((error: boolean) => void) | null = null;
   private onChanged = (changes: Record<string, chrome.storage.StorageChange>, area: string) => {
     if (area !== 'local') return;
     const c = changes[siteKey(this.origin)];
@@ -82,11 +91,38 @@ export class SiteStore {
     this.saveTimer = window.setTimeout(() => void this.flush(), 0);
   }
 
-  async flush() {
+  /**
+   * Persist the record. Never rejects: a failure keeps the record in memory,
+   * logs once, and raises `saveError` so the popup and badge can say so.
+   * Resolves to true when everything in memory reached storage.
+   */
+  async flush(): Promise<boolean> {
     if (this.saveTimer) clearTimeout(this.saveTimer);
     this.saveTimer = 0;
     this.record = { ...this.record, updatedAt: Date.now() };
-    await saveSite(this.record);
+    let ok: boolean;
+    try {
+      const { dropped } = await saveSite(this.record);
+      ok = dropped.length === 0;
+      if (!ok) this.logSaveError(`${dropped.length} sticker(s) could not be stored`);
+    } catch (e) {
+      ok = false;
+      this.logSaveError(e);
+    }
+    this.setSaveError(!ok);
+    return ok;
+  }
+
+  private logSaveError(e: unknown) {
+    if (this.saveErrorLogged) return;
+    this.saveErrorLogged = true;
+    console.error('[aibs] could not save stickers for this site', e);
+  }
+
+  private setSaveError(v: boolean) {
+    if (this.saveError === v) return;
+    this.saveError = v;
+    this.onSaveStatus?.(v);
   }
 
   destroy() {

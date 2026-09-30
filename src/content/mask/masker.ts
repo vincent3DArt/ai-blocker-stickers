@@ -1,6 +1,6 @@
 import type { MaskMode } from '@/shared/types';
 import type { MutationHub } from './guard';
-import { MASK_ATTR, installMaskSheet } from './sheet';
+import { MASK_ATTR, ensureMaskSheet, installMaskSheet } from './sheet';
 import { bullets, collectTextNodes, type TextRange } from './text-mask';
 import {
   leaks,
@@ -157,7 +157,22 @@ export class Masker {
 
   start() {
     installMaskSheet();
-    this.disposeHub = this.hub.addListener((records) => this.onMutations(records));
+    this.disposeHub = this.hub.addListener((records) => {
+      ensureMaskSheet();
+      this.onMutations(records);
+    });
+    // Watchdog for tampering that produces no mutation record (clearing
+    // `document.adoptedStyleSheets`) or that detaches the observer itself
+    // (replacing `<html>`). A plain interval: it keeps running in a hidden tab,
+    // unlike the positioner's slow tick.
+    const watchdog = window.setInterval(() => {
+      ensureMaskSheet();
+      if (this.hub.ensureRoot()) {
+        for (const rec of this.records.values()) if (rec.root.isConnected) this.enforceStyle(rec);
+      }
+    }, 250);
+    this.disposers.push(() => clearInterval(watchdog));
+
     const onCopy = (e: Event) => {
       const t = e.target as Node | null;
       if (t && this.isMaskedNode(t)) {

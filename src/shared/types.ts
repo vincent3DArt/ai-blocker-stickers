@@ -42,15 +42,30 @@ export interface TableContext {
  */
 export interface Fingerprint {
   tag: string;
-  /** Only present when the id passes the stability heuristics. */
+  /**
+   * Only present when the id passes the stability heuristics AND reads like
+   * an identifier (`^[A-Za-z_][\w-]{0,40}$`, no run of 4+ digits). A stable id
+   * that fails the second test is stored as `idHmac` instead.
+   */
   id?: string;
-  /** data-testid | data-test | data-cy | data-qa */
+  /** HMAC (per-install key, exact value) of a stable but non-identifier id. */
+  idHmac?: string;
+  /** data-testid | data-test | data-cy | data-qa, identifier-like values only. */
   testId?: string;
+  /** HMAC of a test id that is not identifier-like. */
+  testIdHmac?: string;
+  /** Identifier-like `name` attribute. */
   name?: string;
+  /** HMAC of a `name` attribute that is not identifier-like. */
+  nameHmac?: string;
+  /** Keyword-shaped values only. */
   type?: string;
   role?: string;
+  /** Normalised like `labelContext`: lowercased, digits and punctuation stripped, <= 40 chars. */
   ariaLabel?: string;
+  /** Normalised like `labelContext`. */
   placeholder?: string;
+
   /** Up to 5 stable class tokens. */
   classes: string[];
   /** Unique-at-creation CSS path, at most 8 segments. */
@@ -208,6 +223,8 @@ export interface TabState {
   stickerCount: number;
   lostCount: number;
   peeking: boolean;
+  /** The last save could not persist every sticker on this site (see SiteStore.flush). */
+  saveError: boolean;
 }
 
 export const DEFAULT_TAB_STATE: TabState = {
@@ -216,4 +233,5 @@ export const DEFAULT_TAB_STATE: TabState = {
   stickerCount: 0,
   lostCount: 0,
   peeking: false,
+  saveError: false,
 };

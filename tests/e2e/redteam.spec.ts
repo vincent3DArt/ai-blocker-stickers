@@ -528,7 +528,31 @@ test.describe('red team: tampering', () => {
     cleanAll(await axReads(page));
   });
 
+  test('13b the mask stylesheet re-installs after the page clears adoptedStyleSheets', async ({ page, ext }) => {
+    await setupStatic(page, ext);
+    // user-select:none on text masks comes only from the adopted sheet, so it
+    // shows whether the sheet itself is back (the hiding styles are inline).
+    const userSelect = () =>
+      page.evaluate(() => {
+        const cs = getComputedStyle(document.getElementById('ssn-cell')!);
+        return cs.userSelect || (cs as unknown as { webkitUserSelect: string }).webkitUserSelect;
+      });
+    expect(await userSelect()).toBe('none');
+    // Read synchronously after clearing, before any watchdog can run: proves
+    // the attack took effect, so the poll below measures a real re-install.
+    const cleared = await page.evaluate(() => {
+      document.adoptedStyleSheets = [];
+      const cs = getComputedStyle(document.getElementById('ssn-cell')!);
+      return cs.userSelect || (cs as unknown as { webkitUserSelect: string }).webkitUserSelect;
+    });
+    expect(cleared).not.toBe('none');
+    await expect.poll(userSelect
+, { timeout: 1500, message: 'mask sheet re-installed' }).toBe('none');
+    expect(await page.textContent('#ssn-cell')).toBe('•'.repeat(11));
+  });
+
   test('14 removing or hiding the overlay host re-mounts it at once', async ({ page, ext }) => {
+
     await setupStatic(page, ext);
     const cell = await boxOf(page, '#ssn-cell');
     const hostOk = () =>

@@ -1,7 +1,7 @@
 import type { Fingerprint } from '@/shared/types';
 import { hmacHex, normalizeText } from '@/shared/hmac';
-import { buildCssPath, buildXPath, isStableId, stableClasses, testId } from './selector';
-import { headingContext, labelInfo, tableContext } from './context';
+import { buildCssPath, buildXPath, isIdentifierLike, isKeyword, isStableId, stableClasses, testId } from './selector';
+import { headingContext, labelInfo, normalizeContext, tableContext } from './context';
 import { toViewRect, viewToDoc } from './geometry';
 
 /** The HMAC key is set once by the content script boot before any fingerprinting. */
@@ -14,6 +14,22 @@ export async function textHmacOf(text: string): Promise<string | undefined> {
   const norm = normalizeText(text);
   if (!norm || !hmacKey) return undefined;
   return hmacHex(hmacKey, norm);
+}
+
+/**
+ * HMAC of an attribute value, un-normalised, for attributes that must match
+ * exactly (`id`, test id, `name`). Domain-separated from text HMACs.
+ */
+export async function attrHmacOf(value: string | null | undefined): Promise<string | undefined> {
+  if (!value || !hmacKey) return undefined;
+  return hmacHex(hmacKey, 'attr\u0000' + value);
+}
+
+/** An attribute stored raw when identifier-like, as an HMAC otherwise. */
+async function rawOrHmac(value: string | null | undefined): Promise<{ raw?: string; hmac?: string }> {
+  if (!value) return {};
+  if (isIdentifierLike(value)) return { raw: value };
+  return { hmac: await attrHmacOf(value) };
 }
 
 /** Text used for the fingerprint: visible text, or the value for form controls. */
@@ -65,17 +81,29 @@ export async function buildFingerprint(el: Element): Promise<Fingerprint> {
   const text = fingerprintText(el);
   const label = labelInfo(el);
   const key = await keyHmacOf(el);
-  const id = el.id && isStableId(el.id) ? el.id : undefined;
+  // Attribute values can carry the covered data itself (the masker scrubs
+  // them for that reason), so none is stored verbatim unless it reads like an
+  // identifier: exact-match attributes fall back to an HMAC, descriptive ones
+  // are normalised exactly like labelContext.
+  const id = await rawOrHmac(el.id && isStableId(el.id) ? el.id : undefined);
+  const tid = await rawOrHmac(testId(el));
+  const name = await rawOrHmac(el.getAttribute('name'));
+  const type = el.getAttribute('type');
+  const role = el.getAttribute('role');
   const rect = viewToDoc(toViewRect(el.getBoundingClientRect()));
   const fp: Fingerprint = {
     tag: el.tagName.toLowerCase(),
-    id,
-    testId: testId(el),
-    name: el.getAttribute('name') ?? undefined,
-    type: el.getAttribute('type') ?? undefined,
-    role: el.getAttribute('role') ?? undefined,
-    ariaLabel: el.getAttribute('aria-label')?.slice(0, 60) ?? undefined,
-    placeholder: el.getAttribute('placeholder')?.slice(0, 60) ?? undefined,
+    id: id.raw,
+    idHmac: id.hmac,
+    testId: tid.raw,
+    testIdHmac: tid.hmac,
+    name: name.raw,
+    nameHmac: name.hmac,
+    type: isKeyword(type) ? type : undefined,
+    role: isKeyword(role) ? role : undefined,
+    ariaLabel: normalizeContext(el.getAttribute('aria-label')),
+    placeholder: normalizeContext(el.getAttribute('placeholder')),
+
     classes: stableClasses(el),
     cssPath: buildCssPath(el),
     xpath: buildXPath(el),

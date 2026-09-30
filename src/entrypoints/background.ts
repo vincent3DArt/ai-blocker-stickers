@@ -1,12 +1,14 @@
 import type { ContentToBackground } from '@/shared/messages';
 import { listSites } from '@/shared/storage';
 import { DEFAULT_TAB_STATE, type TabState } from '@/shared/types';
+import { parseOrigin, scriptId } from '@/shared/origin';
 
 const CONTENT_SCRIPT = 'content-scripts/content.js';
 const DEV_FIXTURE_ORIGINS = ['http://127.0.0.1:4173', 'http://localhost:4173'];
 
-function scriptId(origin: string): string {
-  return 'aibs-' + origin.replace(/[^a-z0-9]/gi, '_');
+/** The popup (or another extension page): same extension, not a content script. */
+function fromExtensionPage(sender: chrome.runtime.MessageSender): boolean {
+  return sender.id === chrome.runtime.id && !sender.tab && (!sender.url || sender.url.startsWith(chrome.runtime.getURL('')));
 }
 
 async function registerOrigin(origin: string): Promise<void> {
@@ -36,18 +38,33 @@ async function hasOriginPermission(origin: string): Promise<boolean> {
   return chrome.permissions.contains({ origins: [`${origin}/*`] });
 }
 
-/** Register every enabled site we still have permission for; drop the rest. */
+/**
+ * Register every enabled site we still have permission for, and unregister
+ * every other script id: disabled sites, sites without permission, and ids
+ * left over from the old (colliding) naming scheme. Origins read from storage
+ * are validated like message input, because content scripts can write it.
+ */
 async function reconcile(): Promise<void> {
+  const wanted = new Set<string>();
   const sites = await listSites();
   for (const s of sites) {
-    if (s.enabled && (await hasOriginPermission(s.origin))) await registerOrigin(s.origin);
-    else await unregisterOrigin(s.origin);
+    const origin = parseOrigin(s.origin);
+    if (!origin || !s.enabled) continue;
+    if (!(await hasOriginPermission(origin))) continue;
+    await registerOrigin(origin);
+    wanted.add(scriptId(origin));
   }
   if (import.meta.env.DEV) {
     for (const o of DEV_FIXTURE_ORIGINS) {
-      if (await hasOriginPermission(o)) await registerOrigin(o);
+      if (await hasOriginPermission(o)) {
+        await registerOrigin(o);
+        wanted.add(scriptId(o));
+      }
     }
   }
+  const registered = await chrome.scripting.getRegisteredContentScripts();
+  const stale = registered.map((r) => r.id).filter((id) => !wanted.has(id));
+  if (stale.length) await chrome.scripting.unregisterContentScripts({ ids: stale }).catch(() => {});
 }
 
 async function injectNow(tabId: number): Promise<void> {
@@ -64,7 +81,7 @@ async function setTabState(tabId: number, state: TabState) {
   if (state.paused) {
     text = '||';
     color = '#b91c1c';
-  } else if (state.lostCount > 0) {
+  } else if (state.saveError || state.lostCount > 0) {
     text = '!';
     color = '#d97706';
   } else if (state.editMode) {
@@ -92,8 +109,8 @@ export default defineBackground(() => {
 
   chrome.permissions.onRemoved.addListener(async (perm) => {
     for (const pattern of perm.origins ?? []) {
-      const origin = pattern.replace(/\/\*$/, '');
-      await unregisterOrigin(origin);
+      const origin = parseOrigin(pattern.replace(/\/\*$/, ''));
+      if (origin) await unregisterOrigin(origin);
     }
   });
 
@@ -105,25 +122,47 @@ export default defineBackground(() => {
         if (tabId !== undefined && sender.frameId === 0) setTabState(tabId, (msg as unknown as ContentToBackground & { type: 'TAB_STATUS' }).state as TabState);
         break;
       }
-      case 'ENABLE_ORIGIN': {
-        const { origin, tabId } = msg as unknown as { origin: string; tabId?: number };
+      case 'ENABLE_ORIGIN':
+      case 'DISABLE_ORIGIN': {
+        // Only the popup may change which sites are protected: a content
+        // script (any enabled origin's isolated world) must not be able to
+        // switch another site's document_start protection off, or register a
+        // pattern of its choosing.
+        if (!fromExtensionPage(sender)) {
+          sendResponse({ ok: false, error: 'sender not allowed' });
+          return undefined;
+        }
+        const origin = parseOrigin(msg.origin);
+        if (!origin) {
+          sendResponse({ ok: false, error: 'invalid origin' });
+          return undefined;
+        }
+        const tabId = typeof msg.tabId === 'number' ? msg.tabId : undefined;
         (async () => {
-          await registerOrigin(origin);
-          if (tabId !== undefined) await injectNow(tabId).catch(() => {});
-          sendResponse({ ok: true });
+          try {
+            if (msg.type === 'ENABLE_ORIGIN') {
+              if (!(await hasOriginPermission(origin))) throw new Error('no host permission for ' + origin);
+              await registerOrigin(origin);
+              if (tabId !== undefined) await injectNow(tabId).catch(() => {});
+            } else {
+              await unregisterOrigin(origin);
+            }
+            sendResponse({ ok: true });
+          } catch (e) {
+            sendResponse({ ok: false, error: e instanceof Error ? e.message : String(e) });
+          }
         })();
         return true;
       }
-      case 'DISABLE_ORIGIN': {
-        const { origin } = msg as unknown as { origin: string };
-        unregisterOrigin(origin).then(() => sendResponse({ ok: true }));
-        return true;
-      }
       case 'GET_TAB_STATE': {
-        const { tabId } = msg as unknown as { tabId: number };
-        getTabState(tabId).then(sendResponse);
+        if (!fromExtensionPage(sender) || typeof msg.tabId !== 'number') {
+          sendResponse(undefined);
+          return undefined;
+        }
+        getTabState(msg.tabId).then(sendResponse, () => sendResponse(undefined));
         return true;
       }
+
     }
     return undefined;
   });

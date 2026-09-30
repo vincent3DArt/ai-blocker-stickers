@@ -24,7 +24,14 @@ describe('defaultPathPattern', () => {
     expect(defaultPathPattern('/clients/list')).toBe('/clients/list');
     expect(defaultPathPattern('/')).toBe('/');
   });
+  it('generalises every id-like segment and any segment with 4+ digits', () => {
+    expect(defaultPathPattern('/accounts/123456789/tx')).toBe('/accounts/*/tx');
+    expect(defaultPathPattern('/c/42/orders/INV-20231/lines')).toBe('/c/*/orders/*/lines');
+    expect(defaultPathPattern('/users/jdoe-55512345/profile')).toBe('/users/*/profile');
+    expect(prefixPathPattern('/accounts/123456789/tx')).toBe('/accounts/*/**');
+  });
 });
+
 
 describe('prefixPathPattern', () => {
   it('replaces the last segment with **', () => {

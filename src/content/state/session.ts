@@ -10,7 +10,7 @@ import type {
   ViewRect,
 } from '@/shared/types';
 import type { StickerSummary } from '@/shared/messages';
-import { defaultPathPattern, matchesPath } from '@/shared/url-match';
+import { defaultPathPattern, matchesPath, sanitizePathPattern } from '@/shared/url-match';
 import type { OverlayHost } from '../overlay/host';
 import { StickerView } from '../overlay/sticker-view';
 import type { Positioner } from '../overlay/positioner';
@@ -313,6 +313,7 @@ export class Session {
       stickerCount: rts.length,
       lostCount: rts.filter((r) => r.status === 'lost').length,
       peeking: this.peeking.size > 0,
+      saveError: this.o.store.saveError,
     };
   }
 
@@ -323,7 +324,7 @@ export class Session {
       kind: 'element',
       id: crypto.randomUUID(),
       scope: { pathPattern: defaultPathPattern(location.pathname) },
-      frame: { depth: this.o.frameDepth, urlPattern: this.o.frameDepth > 0 ? location.origin + location.pathname : undefined },
+      frame: this.frameInfo(),
       source,
       padding: 3,
       createdAt: now,
@@ -349,7 +350,7 @@ export class Session {
       kind: 'rect',
       id: crypto.randomUUID(),
       scope: { pathPattern: defaultPathPattern(location.pathname) },
-      frame: { depth: this.o.frameDepth, urlPattern: this.o.frameDepth > 0 ? location.origin + location.pathname : undefined },
+      frame: this.frameInfo(),
       source: 'rect',
       padding: 0,
       createdAt: now,
@@ -369,10 +370,21 @@ export class Session {
     return sticker;
   }
 
-  /** Change a sticker's URL scope. Drops the runtime when it no longer applies here. */
-  setScope(id: string, pathPattern: string) {
+  /** Frame descriptor for a new sticker: origin plus a generalised path, never the raw URL. */
+  private frameInfo(): Sticker['frame'] {
+    const depth = this.o.frameDepth;
+    return { depth, urlPattern: depth > 0 ? location.origin + defaultPathPattern(location.pathname) : undefined };
+  }
+
+  /**
+   * Change a sticker's URL scope. Drops the runtime when it no longer applies
+   * here. The pattern goes through the same sanitiser as the default scope, so
+   * the popup's "exact path" option cannot store a record id.
+   */
+  setScope(id: string, rawPattern: string) {
     const rt = this.runtimes.get(id);
-    if (!rt) return;
+    if (!rt || typeof rawPattern !== 'string') return;
+    const pathPattern = sanitizePathPattern(rawPattern);
     const updated = { ...rt.sticker, scope: { ...rt.sticker.scope, pathPattern }, updatedAt: Date.now() } as Sticker;
     rt.sticker = updated;
     rt.view.setSticker(updated);

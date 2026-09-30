@@ -22,23 +22,35 @@ export function splitPath(pathname: string): string[] {
   return pathname.split('/').filter((s) => s.length > 0);
 }
 
+/** A run of this many digits is never stored in a pattern (the privacy guard's territory). */
+const DIGIT_RUN = /\d{4,}/;
+
 /**
- * Default scope for a sticker created on `pathname`: the same path, with an
- * ID-like last segment generalised to `*` so the sticker also applies to the
- * next client/record on the same screen.
+ * Replace every segment that is id-like, or that still carries a run of four
+ * or more digits, with `*`. Glob segments are kept. Used for everything that
+ * ends up in storage (scopes and iframe URL patterns), so an account number in
+ * the URL can never reach `chrome.storage.local` or trip the save guard.
+ */
+export function sanitizePathPattern(pattern: string): string {
+  const segs = splitPath(pattern).map((s) =>
+    s === '*' || s === '**' ? s : isIdLikeSegment(s) || DIGIT_RUN.test(s) ? '*' : s,
+  );
+  return segs.length ? '/' + segs.join('/') : '/';
+}
+
+/**
+ * Default scope for a sticker created on `pathname`: the same path with EVERY
+ * id-like segment generalised to `*`, so the sticker also applies to the next
+ * client/record on the same screen and no record id is stored.
  */
 export function defaultPathPattern(pathname: string): string {
-  const segs = splitPath(pathname);
-  if (segs.length === 0) return '/';
-  const last = segs[segs.length - 1];
-  if (isIdLikeSegment(last)) segs[segs.length - 1] = '*';
-  return '/' + segs.join('/');
+  return sanitizePathPattern(pathname);
 }
 
 export function prefixPathPattern(pathname: string): string {
   const segs = splitPath(pathname);
   if (segs.length <= 1) return '/**';
-  return '/' + segs.slice(0, -1).join('/') + '/**';
+  return sanitizePathPattern('/' + segs.slice(0, -1).join('/')).replace(/\/$/, '') + '/**';
 }
 
 export function matchesPath(pattern: string, pathname: string): boolean {

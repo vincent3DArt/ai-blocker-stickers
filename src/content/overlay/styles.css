@@ -77,8 +77,11 @@
   white-space: pre-wrap;
   overflow: hidden;
   pointer-events: none;
+  user-select: none;
+  -webkit-user-select: none;
   z-index: 2;
 }
+
 
 /* Edit-mode chrome */
 .toolbar {
