@@ -28,7 +28,7 @@
     "@types/chrome": "^0.0.300",
     "@types/node": "^26.6.1",
     "jsdom": "^26.0.0",
-    "typescript": "^5.9.3",
+    "typescript": "^7.0.2",
     "vite": "^8.1.5",
     "vitest": "^3.0.0",
     "wxt": "^0.21.3"
