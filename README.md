@@ -115,7 +115,7 @@ or the whole site.
 | Mode | Applies to | What happens |
 |---|---|---|
 | `text` | Elements with text, and rectangles over text | Every non-space character becomes a bullet, so the layout does not reflow. `title`, `alt`, `aria-label`, and `placeholder` are blanked. The root becomes `aria-hidden` and unselectable, and copy, cut, and drag are cancelled. |
-| `input` | `input`, `textarea`, `select`, `contenteditable` | Characters render as discs. The field is `aria-hidden`, removed from the tab order, and blurred on focus. Attributes are blanked. The `.value` is left untouched so form submission still works. |
+| `input` | `input`, `textarea`, `select`, `contenteditable` | Characters render as discs. The field is `aria-hidden`, removed from the tab order, and blurred on focus. Attributes and the default value are blanked. Outside strict mode the live `.value` is left untouched. With **strict input masking** (on while the tab is locked, by default), a text field's `.value` reads back as bullets of the same length, while `FormData` and form submission still get the real value. |
 | `visual-only` | `img`, `canvas`, `video`, `svg`, and similar | The element itself is hidden, plus `aria-hidden` and blanked `alt` and `title`, so overlay drift cannot expose pixels. |
 
 A single mutation observer keeps masks in place. When a framework rewrites a masked text node, the
@@ -124,8 +124,23 @@ only in content-script memory, in the isolated world, where page scripts cannot 
 
 ## Known limitations
 
-1. Input values remain readable via `.value`, `FormData`, and CDP, and in the accessibility tree
-   while focused. Only pixels, the a11y node, and the clipboard are blocked.
+1. Input values. Outside strict mode, a covered field's value stays readable via `.value`,
+   `FormData`, and CDP. Only pixels, the a11y node, the default value, and the clipboard are
+   blocked. **Strict input masking** swaps the live `.value` of covered text fields (`text`,
+   `search`, `tel`, `url`, `email`, `password`, `textarea`) for bullets of the same length. The
+   real value stays in content-script memory. It goes back into `FormData` through the `formdata`
+   event, into the field for the length of a real `submit` event, and into the field while you
+   peek. Forms still submit the real value. The setting is under **Settings** in the popup:
+   *While locked* (default) turns it on only during an AI session or detected automation;
+   *Always* and *Never* do what they say. You cannot weaken it while locked. Caveats:
+   - `new FormData(form)` and submit handlers still see the real value, on purpose.
+   - Code that reads `.value` directly to send it (a fetch-style submit) gets bullets.
+   - A value the page writes into the field is taken as the new real value and masked again.
+     A page that reads `.value` and stores it (common in React controlled inputs) stores bullets
+     in its own state. That is why strict mode is off outside locked sessions by default.
+   - Fields where bullets would fail a `pattern`, email, or URL check are left as they are, so
+     they don't block submission. So are `select`, `contenteditable`, and number or date inputs.
+     The popup counts the fields that are strict right now.
 2. Peek is visible to screenshots while held. It is time-bounded, and the DOM is never unmasked.
 3. Length-preserving bullets leak the length of the secret and its word breaks. Every
    non-space character, including punctuation, becomes a bullet, so an SSN shows as eleven bullets.
@@ -178,8 +193,6 @@ addresses, and CI runs it on every push.
 
 - **Auto-suggest scanner.** Idle-chunked scanning for SSN, EIN, routing, account, IBAN, card, and
   date-of-birth patterns, with validators and label keywords, offered as dashed suggestion chips.
-- **Strict input masking.** An opt-in mode that swaps `.value` outright and restores it from the
-  `formdata` event at submission time.
 
 ## License
 

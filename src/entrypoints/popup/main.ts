@@ -1,6 +1,6 @@
 import type { GetStickersResponse, SessionInfo, StickerSummary } from '@/shared/messages';
-import type { TabState } from '@/shared/types';
-import { loadSite, saveSite } from '@/shared/storage';
+import type { Settings, StrictInputsMode, TabState } from '@/shared/types';
+import { loadSettings, loadSite, saveSettings, saveSite } from '@/shared/storage';
 import { defaultPathPattern, prefixPathPattern, sanitizePathPattern } from '@/shared/url-match';
 import { AUDIT_KEY, isAuditEntry, lockMessage, type AuditEntry } from '@/shared/lock';
 
@@ -140,13 +140,57 @@ async function auditSection(): Promise<HTMLElement> {
   return h('details', { class: 'audit' }, h('summary', {}, 'Lock activity'), list);
 }
 
+const STRICT_CHOICES: Array<{ value: StrictInputsMode; label: string; explain: string }> = [
+  {
+    value: 'locked',
+    label: 'While locked (default)',
+    explain: 'During an AI session or detected automation, covered text fields read back as bullets. Forms still submit the real value.',
+  },
+  {
+    value: 'always',
+    label: 'Always',
+    explain: 'Covered text fields always read back as bullets. Some sites that re-read their own fields may break.',
+  },
+  {
+    value: 'never',
+    label: 'Never',
+    explain: 'Covered fields are hidden on screen and from the accessibility tree, but scripts can still read their value.',
+  },
+];
+
+/**
+ * Settings disclosure. Weakening protection is an unlock, so the choice is
+ * disabled while locked (the content script also defers any downgrade until
+ * the lock ends).
+ */
+function settingsSection(settings: Settings, locked: boolean): HTMLElement {
+  const box = h('fieldset', { disabled: locked, title: locked ? 'Locked: change settings after the AI session ends' : '' });
+  box.append(h('legend', { class: 'muted' }, 'Strict input masking'));
+  for (const c of STRICT_CHOICES) {
+    const radio = h('input', {
+      type: 'radio',
+      name: 'strictInputs',
+      value: c.value,
+      checked: settings.strictInputs === c.value,
+      onchange: async () => {
+        const cur = await loadSettings();
+        await saveSettings({ ...cur, strictInputs: c.value });
+      },
+    });
+    box.append(h('label', {}, radio, ` ${c.label}`, h('span', { class: 'explain' }, c.explain)));
+  }
+  return h('details', { class: 'settings' }, h('summary', {}, 'Settings'), box);
+}
+
 async function render() {
   const tab = await activeTab();
   const origin = originOf(tab?.url);
   const session = await getSession();
   const audit = await auditSection();
+  const settings = await loadSettings();
   app.replaceChildren(h('h1', {}, 'AI Blocker Stickers'));
-  const finish = () => app.append(sessionSection(session), audit);
+  let tabLocked = false;
+  const finish = () => app.append(sessionSection(session), settingsSection(settings, tabLocked || session?.active === true), audit);
 
   if (!tab?.id || !origin) {
     app.append(h('p', { class: 'muted' }, 'Stickers work on http(s) pages only.'));
@@ -198,8 +242,19 @@ async function render() {
 
   const state: TabState = content.state;
   const locked = state.locked === true;
+  tabLocked = locked;
   const lockTitle = locked ? lockMessage(state.lockReason) : '';
   if (locked) app.append(h('p', { class: 'locked' }, `Locked: ${lockTitle}. Stickers stay on.`));
+  const strictCount = state.strictInputs ?? 0;
+  if (strictCount > 0) {
+    app.append(
+      h(
+        'p',
+        { class: 'warn' },
+        `Strict input masking is on for ${strictCount} field${strictCount === 1 ? '' : 's'}: page scripts read bullets, forms submit the real value. A site that re-reads its own fields may misbehave.`,
+      ),
+    );
+  }
 
   const actions = h('div', { class: 'row' });
   actions.append(

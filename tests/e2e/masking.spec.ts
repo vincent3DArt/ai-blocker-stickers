@@ -94,7 +94,11 @@ test.describe('M3 DOM masking', () => {
     for (const line of snapshot.split('\n')) {
       if (line.includes('textbox')) expect(line).not.toContain('123-45-6789');
     }
-    // Documented residual: the raw value is still there for a script that asks for it.
+    // Non-strict mode (default 'locked' setting, tab unlocked): the raw value is
+    // still there for a script that asks for it. Strict mode is covered in
+    // strict-input.spec.ts.
+    expect((await ext.state(page)).strict).toEqual({ on: false, count: 0 });
+    expect(await page.getAttribute('#ssn', 'data-aibs-strict')).toBeNull();
     expect(await page.locator('#ssn').inputValue()).toBe('123-45-6789');
     // Copy is blocked.
     await page.evaluate(() => navigator.clipboard.writeText('clean').catch(() => {}));

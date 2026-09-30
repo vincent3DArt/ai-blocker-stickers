@@ -13,12 +13,45 @@ close them by breaking the page.
 
 ## Readable by design (Phase 1)
 
-1. **Input values.** `.value`, `FormData`, and CDP `Runtime.evaluate` of
-   `.value` all return the real value, because the form has to submit it.
-   The `value` *attribute* (the default) is blanked while the input is
-   covered. A covered `contenteditable` keeps its text in the DOM, because
-   rewriting it would break editing. Phase 2 "strict input masking" deals with
-   both.
+1. **Input values.** Outside strict mode, `.value`, `FormData`, and CDP
+   `Runtime.evaluate` of `.value` all return the real value. The `value`
+   *attribute* (the default) is blanked while the input is covered. A covered
+   `contenteditable` keeps its text in the DOM, because rewriting it would
+   break editing.
+
+   **Strict input masking** (setting `strictInputs`: `locked` by default,
+   which means on while the tab is locked by an AI session or detected
+   automation; or `always` / `never`) narrows this for covered text fields
+   (`text`, `search`, `tel`, `url`, `email`, `password`, `textarea`):
+   - The live `.value` holds bullets of the same length. Every script reading
+     it gets bullets, and so does CDP (Playwright `inputValue()`,
+     `Runtime.evaluate`). The field carries `data-aibs-strict="1"`. The real
+     value stays in content-script memory, never in storage.
+   - `new FormData(form)` and every native submission get the real value. The
+     `formdata` event puts it into the FormData object, and the DOM stays
+     masked. A trusted `submit` event also puts it into the field while the
+     event propagates. So a submit handler that reads `.value` works, and so
+     does any script that builds a FormData. That is by design: the form has
+     to submit. A synthetic `submit` or `formdata` event gets nothing.
+   - Code that reads `.value` directly outside a submit event gets bullets,
+     for example a button handler that `fetch`es the field values. That is the
+     point of strict mode, but it also breaks such a page's submission.
+   - A value the page writes itself (a framework re-rendering a controlled
+     input) becomes the new real value and is masked again. The check runs on
+     input and change events, on every mutation batch, and on a 250 ms timer,
+     so a page write stays readable for at most that long. What cannot be
+     told apart from a real change is a page that reads `.value` (bullets)
+     and writes it back or into its own state, as React-style `onChange`
+     handlers do. The page's state then holds bullets. This is why strict
+     mode is off outside locked sessions by default.
+   - While you peek (unlocked, `always` only, because peek is refused while
+     locked), the field holds the real value so you can read and edit it.
+     Whatever it holds when the peek ends becomes the new real value.
+   - Not covered: fields whose `pattern`, email, or URL check the bullets
+     would fail (they would block submission), `select`, `contenteditable`,
+     and number, date and similar inputs.
+   - A settings change can't turn strict mode off while the tab is locked.
+     The change takes effect when the lock ends.
 2. **Shape.** Bullets keep the length of the text (`•••-••-••••` becomes
    `•••••••••••`), so the length and the word breaks still show.
 

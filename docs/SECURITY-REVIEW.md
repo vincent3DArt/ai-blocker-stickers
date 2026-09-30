@@ -229,6 +229,8 @@ if (!document.adoptedStyleSheets.includes(sheet)) document.adoptedStyleSheets = 
 
 For input mode the mask sets `-webkit-text-security` (visual only), `tabindex=-1` and `aria-hidden`. The field's `.value` is untouched, so any agent that evaluates JS in the page (`document.querySelector('input').value`) or reads DOM properties over CDP gets the plaintext. The accessibility tree is covered by `aria-hidden`. This is a design limitation: rewriting `.value` would break the page's own form. **Fix:** document it in the README threat model. Optionally, offer a "strict" input mode that swaps in a disabled clone showing bullets and moves the real input off-screen with `inert`.
 
+**Resolution (2026-09-30):** Narrowed. Strict input masking (`src/content/mask/strict-input.ts`, setting `strictInputs`, on while the tab is locked by default) swaps the live `.value` of covered text fields for bullets. The real value goes back only through the `formdata` event, a trusted `submit`, or peek. `FormData` and submit handlers still see it by design. See docs/LIMITATIONS.md item 1.
+
 ### L3. A synthetic `contextmenu` event can retarget "Cover this element"
 
 **Where:** `src/content/index.ts:272-279`. A page can listen for the user's right-click and immediately dispatch a synthetic `contextmenu` on a decoy element. `contextTarget` then points at the decoy, and the menu covers the wrong element. **Fix:** `if (!e.isTrusted) return;`.

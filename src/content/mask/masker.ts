@@ -2,6 +2,7 @@ import type { MaskMode } from '@/shared/types';
 import type { MutationHub } from './guard';
 import { MASK_ATTR, ensureMaskSheet, installMaskSheet } from './sheet';
 import { bullets, collectTextNodes, type TextRange } from './text-mask';
+import { StrictInputs, readValue, writeValue, type StrictOptions } from './strict-input';
 import {
   leaks,
   remember,
@@ -138,6 +139,9 @@ export class Masker {
   private disposers: Array<() => void> = [];
   /** Records the page disturbed during the current mutation callback. */
   private pendingStale = new Set<string>();
+  /** Strict input masking: live `.value` swapped for bullets (see strict-input.ts). */
+  private strict: StrictInputs;
+  private strictOn = false;
 
   /**
    * The page replaced a masked root with a structurally identical element (a
@@ -153,12 +157,21 @@ export class Masker {
    */
   onStale: ((id: string) => void) | null = null;
 
-  constructor(private hub: MutationHub) {}
+  constructor(
+    private hub: MutationHub,
+    strictOptions: StrictOptions = {},
+  ) {
+    this.strict = new StrictInputs((el, a, v) => this.writeAttr(el, a, v), strictOptions);
+  }
 
   start() {
     installMaskSheet();
+    this.strict.install();
     this.disposeHub = this.hub.addListener((records) => {
       ensureMaskSheet();
+      // A framework that re-renders a controlled input writes `.value` without
+      // a mutation record, but usually alongside other DOM changes.
+      this.strict.syncAll();
       this.onMutations(records);
     });
     // Watchdog for tampering that produces no mutation record (clearing
@@ -167,6 +180,7 @@ export class Masker {
     // unlike the positioner's slow tick.
     const watchdog = window.setInterval(() => {
       ensureMaskSheet();
+      this.strict.syncAll();
       if (this.hub.ensureRoot()) {
         for (const rec of this.records.values()) if (rec.root.isConnected) this.enforceStyle(rec);
       }
@@ -204,6 +218,8 @@ export class Masker {
       if (recs.length)
         setTimeout(() => {
           for (const r of recs) if (this.records.get(r.id) === r && r.root.isConnected) this.scrubDefaults(r);
+          // The reset put the (real) default back into the live value.
+          this.strict.syncAll();
         }, 0);
     };
     window.addEventListener('reset', onReset, true);
@@ -214,8 +230,42 @@ export class Masker {
     for (const id of Array.from(this.records.keys())) this.restore(id);
     this.disposeHub?.();
     this.disposeHub = null;
+    this.strict.dispose();
     this.disposers.forEach((d) => d());
     this.disposers = [];
+  }
+
+  /**
+   * Turn strict input masking on or off for every covered text field, now and
+   * for fields masked later.
+   */
+  setStrict(on: boolean) {
+    if (this.strictOn === on) return;
+    this.strictOn = on;
+    for (const rec of this.records.values()) {
+      if (rec.mode !== 'input' || rec.subset) continue;
+      if (on) this.engageStrict(rec);
+      else this.strict.release(rec.root);
+    }
+  }
+
+  get isStrict(): boolean {
+    return this.strictOn;
+  }
+
+  /** Covered fields whose live value currently holds bullets. */
+  strictCount(): number {
+    return this.strict.count;
+  }
+
+  private engageStrict(rec: MaskRecord) {
+    if (!this.strictOn || rec.mode !== 'input' || rec.subset) return;
+    if (this.strict.engage(rec.root) && rec.peeking) this.strict.lift(rec.root, 'peek');
+  }
+
+  /** The field's real value: remembered by strict mode, else the live one. */
+  private liveValue(rec: MaskRecord): string {
+    return this.strict.real(rec.root) ?? (rec.root as HTMLInputElement).value ?? '';
   }
 
   /**
@@ -325,6 +375,7 @@ export class Masker {
     if (!rec) return;
     this.records.delete(id);
     if (this.byRoot.get(rec.root) === rec) this.byRoot.delete(rec.root);
+    if (rec.mode === 'input' && !rec.subset) this.strict.release(rec.root);
     for (const split of rec.splits.slice()) this.unsplit(rec, split, false, false);
     for (const [t, original] of rec.texts) {
       if (t.isConnected) this.writeText(t, original);
@@ -343,10 +394,7 @@ export class Masker {
   originals(id: string): string {
     const rec = this.records.get(id);
     if (!rec) return '';
-    if (rec.mode === 'input') {
-      const el = rec.root as HTMLInputElement;
-      return el.value ?? '';
-    }
+    if (rec.mode === 'input') return this.liveValue(rec);
     const parts: string[] = [];
     for (const [t, original] of rec.texts) if (t.isConnected) parts.push(original);
     return parts.join(' ').replace(/\s+/g, ' ').trim();
@@ -360,6 +408,17 @@ export class Masker {
     if (rec.mode === 'input') {
       this.writeAttr(rec.root, MASK_ATTR, on ? 'input-peek' : 'input');
       this.enforceStyle(rec);
+      if (this.strict.has(rec.root)) {
+        if (on) {
+          this.strict.lift(rec.root, 'peek');
+        } else {
+          // Whatever the user typed during the peek is the new real value;
+          // the field must not keep taking keystrokes into bullets.
+          this.strict.settle(rec.root, 'peek');
+          const active = document.activeElement;
+          if (active === rec.root) (active as HTMLElement).blur?.();
+        }
+      }
     }
   }
 
@@ -425,6 +484,7 @@ export class Masker {
       scrubAttrs(rec.attrs, root, write);
       this.scrubDefaults(rec);
       scrubTokenAttrs(rec.attrs, root, this.tokens(rec), write);
+      this.engageStrict(rec);
       this.writeAttr(root, MASK_ATTR, rec.peeking ? 'input-peek' : 'input');
       this.writeAttr(root, 'tabindex', '-1');
       if (document.activeElement === root || root.contains(document.activeElement)) {
@@ -441,10 +501,7 @@ export class Masker {
 
   /** What an attribute would have to repeat to leak this record's content. */
   private tokens(rec: MaskRecord): Tokens {
-    if (rec.mode === 'input') {
-      const el = rec.root as HTMLInputElement;
-      return tokensOf([el.value ?? '', ...rec.texts.values()]);
-    }
+    if (rec.mode === 'input') return tokensOf([this.liveValue(rec), ...rec.texts.values()]);
     return tokensOf(rec.texts.values());
   }
 
@@ -453,22 +510,21 @@ export class Masker {
    * and it is serialised into innerHTML/outerHTML and read by getAttribute.
    * Assigning `.value` first flips the control's dirty flag, so the live value
    * (what the form submits) stops following the default; only then is the
-   * default blanked. The live `.value` itself is the documented residual.
+   * default blanked. The live `.value` itself is the documented residual,
+   * unless strict input masking is on (see strict-input.ts).
    */
   private scrubDefaults(rec: MaskRecord) {
     const el = rec.root;
     if (isValueModeInput(el)) {
       const v = el.getAttribute('value');
       if (!v) return;
-      const live = el.value;
-      el.value = live;
+      writeValue(el, readValue(el));
       remember(rec.attrs, el, 'value');
       this.writeAttr(el, 'value', '');
     } else if (el instanceof HTMLTextAreaElement) {
       const kids = collectTextNodes(el);
       if (kids.length === 0) return;
-      const live = el.value;
-      el.value = live;
+      writeValue(el, readValue(el));
       for (const t of kids) this.maskText(rec, t);
     }
   }
@@ -764,7 +820,7 @@ export class Masker {
           // A framework syncing the default (React does): take it as the new default, blank again.
           if (current) {
             backup();
-            el.value = el.value;
+            writeValue(el, readValue(el));
             this.writeAttr(el, 'value', '');
           }
         } else if ((attr === 'src' || attr === 'srcset') && rec.mode === 'visual-only' && mediaSources(rec.root).includes(el)) {

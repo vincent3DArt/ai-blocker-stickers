@@ -278,7 +278,9 @@ test.describe('red team: MAIN-world readers', () => {
     await setupForms(page, ext);
     cleanAll(await mainWorldReads(page));
     expect(await page.title()).toBe('Fixture: forms');
-    // The submission-relevant value is untouched (documented, channel 15).
+    // Channel 15, non-strict mode (default 'locked' setting, tab unlocked): the
+    // submission-relevant value is untouched (documented residual).
+    expect((await ext.state(page)).strict).toEqual({ on: false, count: 0 });
     expect(await page.locator('#ssn').inputValue()).toBe('123-45-6789');
   });
 
@@ -623,10 +625,13 @@ test.describe('red team: peek abuse', () => {
 });
 
 test.describe('red team: input value (documented residual)', () => {
-  test('15 .value / FormData readable as documented; selection, copy and AX are not', async ({ page, ext }) => {
+  test('15 non-strict: .value / FormData readable as documented; selection, copy and AX are not', async ({ page, ext }) => {
     await ext.context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: ORIGIN });
     await setupForms(page, ext);
-    // Documented Phase 1 residual: the live value stays for form submission.
+    // Default 'locked' setting on an unlocked tab: strict input masking is off,
+    // and the live value stays for form submission (documented residual).
+    expect((await ext.state(page)).strict).toEqual({ on: false, count: 0 });
+    expect(await page.getAttribute('#ssn', 'data-aibs-strict')).toBeNull();
     expect(await page.locator('#ssn').inputValue()).toBe('123-45-6789');
     expect(
       await page.evaluate(() => new FormData(document.getElementById('intake') as HTMLFormElement).get('ssn')),
@@ -653,6 +658,29 @@ test.describe('red team: input value (documented residual)', () => {
     await page.waitForTimeout(50);
     expect(await page.locator('#ssn').inputValue()).toBe('123-45-6789');
     cleanAll(await mainWorldReads(page));
+  });
+
+  test('15 strict: .value reads bullets for every reader, FormData and reset keep the real value', async ({ page, ext }) => {
+    await ext.worker.evaluate(() => chrome.storage.local.set({ settings: { strictInputs: 'always' } }));
+    await setupForms(page, ext);
+    await expect.poll(async () => (await ext.state(page)).strict?.count).toBe(1);
+    const reads = async () => {
+      const r = await mainWorldReads(page);
+      r.values = await page.evaluate(() =>
+        Array.from(document.querySelectorAll('input,textarea')).map((i) => (i as HTMLInputElement).value).join('|'),
+      );
+      r.inputValue = await page.locator('#ssn').inputValue();
+      return r;
+    };
+    cleanAll(await reads());
+    cleanAll(await axReads(page));
+    const formSsn = () => page.evaluate(() => new FormData(document.getElementById('intake') as HTMLFormElement).get('ssn'));
+    expect(await formSsn()).toBe('123-45-6789');
+    // A form reset goes back to the page's own default, which is then masked again.
+    await page.evaluate(() => (document.getElementById('intake') as HTMLFormElement).reset());
+    await expect.poll(() => page.locator('#ssn').inputValue(), { timeout: 2000 }).toBe('•'.repeat(11));
+    expect(await formSsn()).toBe('123-45-6789');
+    cleanAll(await reads());
   });
 });
 

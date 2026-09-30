@@ -19,7 +19,9 @@
   <div class="field"><label for="acct">Account number</label><input id="acct" name="acct" value="9876543210"></div>
   <div class="field"><label for="notes">Notes</label><textarea id="notes" name="notes">Spouse SSN 987-65-4321</textarea></div>
   <div class="field"><label>Editor</label><div id="editor" contenteditable="true">Dependent SSN 111-22-3333 typed in an editor.</div></div>
+  <div class="field"><label for="ctrl">Controlled</label><input id="ctrl" name="ctrl" value="222-33-4444"></div>
   <button type="submit">Submit</button>
+  <button type="button" id="send-fetch">Send (fetch-style)</button>
 </form>
 <div id="react-ish">
   <p>Live value: <span id="live">123-45-6789</span></p>
@@ -40,6 +42,26 @@
     e.preventDefault();
     window.__submitted = Object.fromEntries(new FormData(e.target).entries());
   });
+  // A fetch-style submit: reads .value straight off the fields, no FormData.
+  document.getElementById('send-fetch').addEventListener('click', () => {
+    window.__submitted2 = {
+      ssn: document.getElementById('ssn').value,
+      ctrl: document.getElementById('ctrl').value,
+    };
+  });
+  // A React-like controlled input: its state follows every input event and is
+  // written back into the field; a re-render writes the state into the field.
+  const ctrl = document.getElementById('ctrl');
+  let ctrlState = ctrl.value;
+  ctrl.addEventListener('input', () => {
+    ctrlState = ctrl.value;
+    ctrl.value = ctrlState;
+  });
+  window.__ctrlState = () => ctrlState;
+  window.__rerenderCtrl = (v) => {
+    ctrlState = v;
+    if (ctrl.value !== v) ctrl.value = v;
+  };
 </script>
 </body>
 </html>

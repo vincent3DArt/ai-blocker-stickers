@@ -25,6 +25,8 @@ export interface TestState {
     reason?: string;
     signals: { debugger: boolean; manual: boolean; localSession: boolean; webdriver: boolean };
   };
+  /** Strict input masking: whether it applies in this tab, and how many fields it holds. */
+  strict?: { on: boolean; count: number };
 }
 
 export interface Ext {

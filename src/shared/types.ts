@@ -195,7 +195,16 @@ export interface Settings {
     showLabel: boolean;
   };
   ghostAnchors: boolean;
+  /**
+   * Strict input masking: a covered text field's live `.value` holds bullets
+   * and the real value is handed back only to FormData / form submission.
+   * `locked` (default): only while the AI-session lock is on.
+   */
+  strictInputs: StrictInputsMode;
 }
+
+export type StrictInputsMode = 'locked' | 'always' | 'never';
+export const STRICT_INPUTS_MODES: readonly StrictInputsMode[] = ['locked', 'always', 'never'];
 
 export const DEFAULT_SETTINGS: Settings = {
   v: 1,
@@ -210,7 +219,22 @@ export const DEFAULT_SETTINGS: Settings = {
     showLabel: true,
   },
   ghostAnchors: true,
+  strictInputs: 'locked',
 };
+
+/** Fill in defaults and drop unknown values from a stored (possibly partial or stale) settings object. */
+export function normalizeSettings(s: Partial<Settings> | undefined | null): Settings {
+  const src = s && typeof s === 'object' ? s : {};
+  return {
+    ...DEFAULT_SETTINGS,
+    ...src,
+    peek: { ...DEFAULT_SETTINGS.peek, ...(src.peek ?? {}) },
+    appearance: { ...DEFAULT_SETTINGS.appearance, ...(src.appearance ?? {}) },
+    strictInputs: STRICT_INPUTS_MODES.includes(src.strictInputs as StrictInputsMode)
+      ? (src.strictInputs as StrictInputsMode)
+      : DEFAULT_SETTINGS.strictInputs,
+  };
+}
 
 import type { LockReason } from './lock';
 
@@ -230,6 +254,8 @@ export interface TabState {
   /** AI-session lock: peek, pause, delete and the edit tools are refused. */
   locked: boolean;
   lockReason?: LockReason;
+  /** Covered text fields whose `.value` currently holds bullets (strict input masking). */
+  strictInputs?: number;
 }
 
 export const DEFAULT_TAB_STATE: TabState = {

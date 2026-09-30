@@ -1,4 +1,4 @@
-import { DEFAULT_SETTINGS, type Settings, type SiteRecord } from './types';
+import { normalizeSettings, type Settings, type SiteRecord } from './types';
 import { randomKeyB64 } from './hmac';
 
 export const siteKey = (origin: string) => `site:${origin}`;
@@ -67,8 +67,7 @@ export async function listSites(): Promise<SiteRecord[]> {
 
 export async function loadSettings(): Promise<Settings> {
   const res = await chrome.storage.local.get(SETTINGS_KEY);
-  const s = res[SETTINGS_KEY] as Partial<Settings> | undefined;
-  return { ...DEFAULT_SETTINGS, ...(s ?? {}), peek: { ...DEFAULT_SETTINGS.peek, ...(s?.peek ?? {}) } };
+  return normalizeSettings(res[SETTINGS_KEY] as Partial<Settings> | undefined);
 }
 
 export async function saveSettings(s: Settings): Promise<void> {

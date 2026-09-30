@@ -352,6 +352,7 @@ export class Session {
       lostCount: rts.filter((r) => r.status === 'lost').length,
       peeking: this.peeking.size > 0,
       saveError: this.o.store.saveError,
+      strictInputs: this.o.masker.strictCount(),
     };
   }
 

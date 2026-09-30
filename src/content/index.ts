@@ -1,5 +1,5 @@
 import type { Settings, Sticker, TabState } from '@/shared/types';
-import { DEFAULT_TAB_STATE } from '@/shared/types';
+import { DEFAULT_TAB_STATE, normalizeSettings } from '@/shared/types';
 import { isToContent, type GetStickersResponse, type LockUpdate, type LockedReply, type ToContent } from '@/shared/messages';
 import { SESSION_ACTIVE_KEY, computeLock, lockMessage, type LockState } from '@/shared/lock';
 import { loadOrCreateSecret, loadSettings } from '@/shared/storage';
@@ -151,6 +151,20 @@ export async function boot() {
   let lock: LockState = currentLock();
   session.setLocked(lock.locked);
   tabState = { ...tabState, locked: lock.locked, lockReason: lock.reason };
+
+  /**
+   * Strict input masking follows the setting: always, never, or (default)
+   * only while the tab is locked. A settings change can never turn it OFF
+   * while locked: that would lift protection, which the lock forbids; it
+   * takes effect when the lock ends.
+   */
+  const updateStrict = () => {
+    const mode = settings.strictInputs;
+    let on = mode === 'always' || (mode === 'locked' && lock.locked);
+    if (!on && lock.locked && masker.isStrict) on = true;
+    masker.setStrict(on);
+  };
+  updateStrict();
 
   hub.onBatch(() => {
     session.onMutationBatch();
@@ -341,7 +355,8 @@ export async function boot() {
       toolbar.hide();
     }
     session.setLocked(lock.locked);
-    sendState({ locked: lock.locked, lockReason: lock.reason, paused: session.isPaused });
+    updateStrict();
+    sendState({ locked: lock.locked, lockReason: lock.reason, paused: session.isPaused, strictInputs: masker.strictCount() });
     positioner.flush();
   }
   const relock = () => applyLock(currentLock());
@@ -468,6 +483,7 @@ export async function boot() {
           state: { ...tabState, ...session.state() },
           pieces,
           lock: { ...lock, signals: { debugger: bgLock.debugger, manual: bgLock.manual, localSession, webdriver: webdriver() } },
+          strict: { on: masker.isStrict, count: masker.strictCount() },
         });
         return true;
       }
@@ -477,8 +493,10 @@ export async function boot() {
 
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area === 'local' && changes.settings?.newValue) {
-      settings = changes.settings.newValue as Settings;
+      settings = normalizeSettings(changes.settings.newValue as Partial<Settings>);
       host.setColor(settings.appearance.color);
+      updateStrict();
+      sendState({ strictInputs: masker.strictCount() });
     }
     if (area === 'local' && SESSION_ACTIVE_KEY in changes) {
       localSession = changes[SESSION_ACTIVE_KEY].newValue === true;
