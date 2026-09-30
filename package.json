@@ -2,6 +2,12 @@
   "name": "ai-blocker-stickers",
   "description": "Opaque, content-anchored stickers that hide sensitive page regions from AI agents (screenshots and page readers).",
   "private": true,
+  "license": "PolyForm-Noncommercial-1.0.0",
+  "author": "Vinh Nguyen (vincent3DArt)",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/vincent3DArt/ai-blocker-stickers.git"
+  },
   "version": "0.1.0",
   "type": "module",
   "scripts": {
@@ -13,6 +19,7 @@
     "test:watch": "vitest",
     "build:dev": "wxt build --mode development",
     "e2e": "wxt build --mode development && playwright test",
+    "scan": "node scripts/scan-fixtures.mjs",
     "fixtures": "vite preview --outDir fixtures --port 4173 --strictPort",
     "postinstall": "wxt prepare"
   },

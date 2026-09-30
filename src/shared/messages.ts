@@ -18,7 +18,7 @@ export type ToContent =
   | { type: 'START_RECT' }
   | { type: 'START_PICK' }
   // Development builds only: drive placement from tests.
-  | { type: 'TEST_COVER'; selector: string }
+  | { type: 'TEST_COVER'; selector: string; shadowHost?: string }
   | { type: 'TEST_RECT'; rect: { x: number; y: number; w: number; h: number } }
   | { type: 'TEST_STATE' };
 

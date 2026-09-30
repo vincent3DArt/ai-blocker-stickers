@@ -1,5 +1,7 @@
 # AI Blocker Stickers
 
+**Status:** in testing with one user. Not on the Chrome Web Store.
+
 An AI blocker sticker is an opaque patch you place by hand over a sensitive region of a web page.
 It is for people who let an AI agent drive their browser but cannot let it see everything. A tax
 preparer, for example, can open a client file and let an agent work in it, while the client's SSN
@@ -142,6 +144,10 @@ swap fonts, toggle a responsive breakpoint, move a cell into a modal, re-render 
 hashes, and delete a row. After each change the test asserts that the sticker still covers the
 target and nothing else.
 
+**Test data.** Every SSN, EIN, and account number in `fixtures/` is invented. None of them is a real
+identifier. `pnpm scan` checks the rest of the repository for real-looking numbers, keys, and email
+addresses, and CI runs it on every push.
+
 ## Roadmap (Phase 2)
 
 - **Auto-suggest scanner.** Idle-chunked scanning for SSN, EIN, routing, account, IBAN, card, and
@@ -150,3 +156,12 @@ target and nothing else.
   manually; while locked, peek, edit, pause, and delete are refused and weak anchors over-mask.
 - **Strict input masking.** An opt-in mode that swaps `.value` outright and restores it from the
   `formdata` event at submission time.
+
+## License
+
+This project is licensed under the [PolyForm Noncommercial License 1.0.0](LICENSE). You may use,
+modify, and share it for any noncommercial purpose. Commercial use needs written permission from the
+author. To ask, open an issue on GitHub.
+
+See [SECURITY.md](SECURITY.md) to report a leak and [CONTRIBUTING.md](CONTRIBUTING.md) to send a
+change.

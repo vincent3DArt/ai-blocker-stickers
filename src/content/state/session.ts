@@ -66,12 +66,42 @@ export class Session {
   private resolveAgain = false;
   private maskTimer = 0;
   private maskRetryUntil = 0;
+  private peeking = new Set<string>();
 
   private disposers: Array<() => void> = [];
 
   constructor(private o: SessionOptions) {
     this.watchSettling();
     this.watchVisibility();
+    this.o.masker.onRebind = (id, el) => this.onMaskRebind(id, el);
+    this.o.masker.onStale = (id) => this.onMaskStale(id);
+  }
+
+  /**
+   * The masker already moved an element sticker's mask onto the page's fresh
+   * copy of its anchor (or, for a rect, found the fresh copy of its
+   * container). Adopt it as the anchor right away, in the same mutation
+   * callback, instead of detaching and waiting for the resolver.
+   */
+  private onMaskRebind(id: string, el: Element) {
+    const rt = this.runtimes.get(id);
+    if (!rt || this.paused) return;
+    if (rt.el && rt.el !== el) this.o.positioner.unobserve(rt.el);
+    rt.el = el;
+    rt.status = 'resolved';
+    rt.clip = clipChain(el);
+    rt.lastRectKey = '';
+    this.o.positioner.observe(el);
+    if (rt.sticker.kind === 'rect') this.maskRect(rt);
+    this.o.positioner.markDirty();
+  }
+
+  /** The page rewrote text under a rect: rescan now, not on the next batch. */
+  private onMaskStale(id: string) {
+    const rt = this.runtimes.get(id);
+    if (!rt || this.paused || rt.sticker.kind !== 'rect' || rt.status !== 'resolved' || !rt.el?.isConnected) return;
+    rt.lastRectKey = '';
+    this.maskRect(rt);
   }
 
   /**
@@ -282,7 +312,7 @@ export class Session {
       paused: this.paused,
       stickerCount: rts.length,
       lostCount: rts.filter((r) => r.status === 'lost').length,
-      peeking: false,
+      peeking: this.peeking.size > 0,
     };
   }
 
@@ -422,6 +452,8 @@ export class Session {
       if (!rt) continue;
       rt.view.setPeeking(on);
       this.o.masker.setPeek(id, on);
+      if (on) this.peeking.add(id);
+      else this.peeking.delete(id);
     }
     this.o.onState({ peeking: on && ids.length > 0 });
   }
@@ -481,6 +513,7 @@ export class Session {
   private drop(id: string) {
     const rt = this.runtimes.get(id);
     if (!rt) return;
+    this.peeking.delete(id);
     this.o.masker.restore(id);
     if (rt.el) this.o.positioner.unobserve(rt.el);
     rt.view.destroy();

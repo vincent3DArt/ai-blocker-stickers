@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Fixture: shadow DOM and frames</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 0; padding: 16px; }
+  #shadow-host { display: block; width: 420px; }
+  iframe { display: block; width: 480px; height: 90px; border: 1px solid #999; margin-top: 12px; }
+</style>
+</head>
+<body>
+<h1>Shadow and frame fixture</h1>
+<p>Outside text stays readable.</p>
+<div id="shadow-host"></div>
+<iframe id="inner" src="/frame-inner.html" title="Inner frame"></iframe>
+<script>
+  // Fake identifiers only. The shadow root is open so the page (and an agent
+  // running in the page's world) can reach into it.
+  const root = document.getElementById('shadow-host').attachShadow({ mode: 'open' });
+  root.innerHTML =
+    '<style>p { margin: 8px 0; } .narrow { width: 260px; }</style>' +
+    '<p>Shadow SSN: <span id="shadow-ssn">123-45-6789</span></p>' +
+    '<p class="narrow" id="shadow-para">Spouse SSN is 987-65-4321 inside the shadow root.</p>';
+  // A framework re-rendering inside the shadow root.
+  window.rerenderShadow = () => {
+    root.getElementById('shadow-ssn').textContent = ['123', '45', '6789'].join('-');
+  };
+</script>
+</body>
+</html>
