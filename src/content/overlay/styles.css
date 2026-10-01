@@ -203,3 +203,60 @@
   pointer-events: none;
   z-index: 4;
 }
+
+/* Auto-suggest: dashed outline (never takes clicks) plus a chip (the only clickable part). */
+.suggestions {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 1;
+}
+
+.sg-piece {
+  position: absolute;
+  left: 0;
+  top: 0;
+  border: 2px dashed #f59e0b;
+  border-radius: 3px;
+  background: rgba(245, 158, 11, 0.06);
+  pointer-events: none;
+}
+
+.sg-chip {
+  position: absolute;
+  left: 0;
+  top: 0;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  height: 20px;
+  padding: 0 2px 0 6px;
+  background: #92400e;
+  color: #fff;
+  border-radius: 10px;
+  font: 600 11px/20px system-ui, sans-serif;
+  white-space: nowrap;
+  pointer-events: auto;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+  user-select: none;
+}
+
+.sg-chip button {
+  all: unset;
+  padding: 0 6px;
+  height: 16px;
+  line-height: 16px;
+  border-radius: 8px;
+  cursor: pointer;
+  font: 600 11px/16px system-ui, sans-serif;
+}
+
+.sg-chip .sg-cover {
+  background: #fbbf24;
+  color: #111827;
+}
+
+.sg-chip button:hover {
+  background: #b45309;
+  color: #fff;
+}

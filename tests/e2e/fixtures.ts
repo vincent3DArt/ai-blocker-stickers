@@ -18,7 +18,7 @@ export interface PieceInfo {
 
 export interface TestState {
   stickers: { id: string; kind: 'element' | 'rect'; status: 'resolving' | 'resolved' | 'lost'; pathPattern: string }[];
-  state: { editMode: boolean; paused: boolean; stickerCount: number; lostCount: number; peeking?: boolean; locked?: boolean; lockReason?: string };
+  state: { editMode: boolean; paused: boolean; stickerCount: number; lostCount: number; peeking?: boolean; locked?: boolean; lockReason?: string; saveError?: boolean };
   pieces: PieceInfo[];
   lock?: {
     locked: boolean;
@@ -27,6 +27,17 @@ export interface TestState {
   };
   /** Strict input masking: whether it applies in this tab, and how many fields it holds. */
   strict?: { on: boolean; count: number };
+  /** Auto-suggest scanner. */
+  scan?: {
+    active: boolean;
+    scanning: boolean;
+    total: number;
+    /** Suggestion chips drawn in the overlay. */
+    chips: number;
+    autoCount: number;
+    stats?: { startedAt: number; finishedAt: number; blocks: number; candidates: number; textNodes: number; chunks: number; maxChunkMs: number };
+    suggestions: { id: string; pattern: string; name: string; score: number; bonus: number; tag: string; elId?: string }[];
+  };
 }
 
 export interface Ext {
@@ -71,7 +82,9 @@ export const test = base.extend<{ ext: Ext; page: Page }>({
     // Playwright is itself a debugger on every tab and sets navigator.webdriver,
     // so the AI-session auto-lock would lock the whole suite. The dev build
     // honours this flag; tests/e2e/lock.spec.ts clears it.
-    await worker.evaluate(() => chrome.storage.local.set({ aibsNoAutoLock: true }));
+    // The auto-suggest scanner would add suggestion chips and, while locked,
+    // auto-cover every fixture number; the suites that test it clear this flag.
+    await worker.evaluate(() => chrome.storage.local.set({ aibsNoAutoLock: true, aibsNoScan: true }));
 
     const send = async <T,>(page: Page, msg: Record<string, unknown>): Promise<T> => {
       await page.bringToFront();

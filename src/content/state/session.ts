@@ -337,6 +337,7 @@ export class Session {
       id: rt.sticker.id,
       kind: rt.sticker.kind,
       label: rt.sticker.label,
+      source: rt.sticker.source,
       status: rt.status,
       pathPattern: rt.sticker.scope.pathPattern,
       currentPath: location.pathname,
@@ -353,15 +354,27 @@ export class Session {
       peeking: this.peeking.size > 0,
       saveError: this.o.store.saveError,
       strictInputs: this.o.masker.strictCount(),
+      autoCount: this.o.store.ephemeralIds.length,
     };
   }
 
-  async addElementSticker(el: Element, source: StickerSource): Promise<Sticker> {
+  /**
+   * `opts.id`: the element was already masked under this id (the scanner's
+   * pre-paint auto-cover), and the sticker takes that mask over instead of
+   * re-applying it. If the page re-rendered the element meanwhile, the mask
+   * followed the fresh copy, and so does the sticker.
+   * `opts.ephemeral`: session-scoped, held in memory only (see SiteStore).
+   */
+  async addElementSticker(el: Element, source: StickerSource, opts: { id?: string; ephemeral?: boolean } = {}): Promise<Sticker> {
     const now = Date.now();
+    const premasked = opts.id ? this.o.masker.rootOf(opts.id) : undefined;
+    if (premasked?.isConnected) el = premasked;
     const anchor = await buildFingerprint(el);
+    const moved = opts.id ? this.o.masker.rootOf(opts.id) : undefined;
+    if (moved?.isConnected && moved !== el) el = moved;
     const sticker: ElementSticker = {
       kind: 'element',
-      id: crypto.randomUUID(),
+      id: opts.id ?? crypto.randomUUID(),
       scope: { pathPattern: defaultPathPattern(location.pathname) },
       frame: this.frameInfo(),
       source,
@@ -371,7 +384,8 @@ export class Session {
       anchor,
       maskMode: defaultMaskMode(el),
     };
-    this.o.store.upsert(sticker);
+    if (opts.ephemeral) this.o.store.addEphemeral(sticker);
+    else this.o.store.upsert(sticker);
     const rt = this.track(sticker);
     this.attach(rt, el, 'high');
     this.o.positioner.flush();
@@ -440,6 +454,31 @@ export class Session {
     this.o.store.remove(id);
     this.o.positioner.flush();
     this.reportState();
+  }
+
+  /** Session-scoped (auto-covered) stickers currently held in memory. */
+  get ephemeralCount(): number {
+    return this.o.store.ephemeralIds.length;
+  }
+
+  /** End of an AI session: keep the auto-covered stickers as ordinary stored ones. */
+  keepEphemeral(): number {
+    const ids = this.o.store.keepEphemeral();
+    this.reportState();
+    return ids.length;
+  }
+
+  /** End of an AI session, not kept: unmask and forget them. Refused while locked. */
+  dropEphemeral(): number {
+    if (this.locked) return 0;
+    const ids = this.o.store.ephemeralIds;
+    for (const id of ids) {
+      this.drop(id);
+      this.o.store.remove(id);
+    }
+    this.o.positioner.flush();
+    this.reportState();
+    return ids.length;
   }
 
   /** Re-anchor a lost sticker to a user-picked element. */
@@ -584,6 +623,9 @@ export class Session {
     rt.clip = clipChain(el);
     rt.lastRectKey = '';
     this.o.positioner.observe(el);
+    // Already masked under this id (pre-paint auto-cover): re-applying would
+    // write the raw text back for a moment.
+    if (rt.sticker.kind === 'element' && this.o.masker.rootOf(rt.sticker.id) === el) return;
     if (!this.paused) this.applyMask(rt);
   }
 

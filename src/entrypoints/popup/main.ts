@@ -1,5 +1,5 @@
-import type { GetStickersResponse, SessionInfo, StickerSummary } from '@/shared/messages';
-import type { Settings, StrictInputsMode, TabState } from '@/shared/types';
+import type { GetStickersResponse, GetSuggestionsResponse, SessionInfo, StickerSummary } from '@/shared/messages';
+import type { ScanSensitivity, Settings, StrictInputsMode, TabState } from '@/shared/types';
 import { loadSettings, loadSite, saveSettings, saveSite } from '@/shared/storage';
 import { defaultPathPattern, prefixPathPattern, sanitizePathPattern } from '@/shared/url-match';
 import { AUDIT_KEY, isAuditEntry, lockMessage, type AuditEntry } from '@/shared/lock';
@@ -60,7 +60,7 @@ function showRefusal(res: unknown) {
  * permission prompts are allowed: all sites (stickers and the lock apply
  * everywhere) and, the first time, the optional debugger permission.
  */
-function sessionSection(session: SessionInfo | null): HTMLElement {
+function sessionSection(session: SessionInfo | null, autoCount: number): HTMLElement {
   const box = h('section', { class: 'session' });
   if (!session) return box;
   if (session.active) {
@@ -73,7 +73,14 @@ function sessionSection(session: SessionInfo | null): HTMLElement {
           class: 'danger',
           onclick: async () => {
             if (!confirm('End the AI session? Peek, edit, pause and delete will work again.')) return;
-            await chrome.runtime.sendMessage({ type: 'END_SESSION', keepAllSites: keep.checked });
+            // Default keep: OK keeps them (stored like any sticker), Cancel removes them.
+            let keepAuto = true;
+            if (autoCount > 0) {
+              keepAuto = confirm(
+                `Keep ${autoCount} auto-covered sticker${autoCount === 1 ? '' : 's'}?\n\nOK keeps them on their sites. Cancel removes them.`,
+              );
+            }
+            await chrome.runtime.sendMessage({ type: 'END_SESSION', keepAllSites: keep.checked, keepAuto });
             render();
           },
         },
@@ -179,7 +186,109 @@ function settingsSection(settings: Settings, locked: boolean): HTMLElement {
     });
     box.append(h('label', {}, radio, ` ${c.label}`, h('span', { class: 'explain' }, c.explain)));
   }
-  return h('details', { class: 'settings' }, h('summary', {}, 'Settings'), box);
+  const scan = h('fieldset', { disabled: locked, title: locked ? 'Locked: change settings after the AI session ends' : '' });
+  scan.append(
+    h('legend', { class: 'muted' }, 'Suggestions'),
+    h(
+      'label',
+      {},
+      h('input', {
+        type: 'checkbox',
+        checked: settings.scanDefault,
+        onchange: async (e: Event) => {
+          const cur = await loadSettings();
+          await saveSettings({ ...cur, scanDefault: (e.target as HTMLInputElement).checked });
+        },
+      }),
+      ' Suggest stickers on new sites',
+    ),
+  );
+  for (const c of SENSITIVITY_CHOICES) {
+    const radio = h('input', {
+      type: 'radio',
+      name: 'scanSensitivity',
+      value: c.value,
+      checked: settings.scanSensitivity === c.value,
+      onchange: async () => {
+        const cur = await loadSettings();
+        await saveSettings({ ...cur, scanSensitivity: c.value });
+      },
+    });
+    scan.append(h('label', {}, radio, ` ${c.label}`, h('span', { class: 'explain' }, c.explain)));
+  }
+  return h('details', { class: 'settings' }, h('summary', {}, 'Settings'), box, scan);
+}
+
+const SENSITIVITY_CHOICES: Array<{ value: ScanSensitivity; label: string; explain: string }> = [
+  { value: 'labeled-only', label: 'Labeled only', explain: 'Only numbers next to a label such as "SSN" or "Account number".' },
+  {
+    value: 'balanced',
+    label: 'Balanced (default)',
+    explain: 'Checksummed numbers (SSN format, cards, IBAN) on their own; weaker patterns only near a label.',
+  },
+  { value: 'aggressive', label: 'Aggressive', explain: 'Also EIN and routing-shaped numbers without a label. More false alarms.' },
+];
+
+/** Suggestions waiting on this page: count, Cover all, Review, and the per-site switch. */
+async function suggestionsSection(tabId: number, origin: string, settings: Settings): Promise<HTMLElement> {
+  const box = h('section', { class: 'suggest' });
+  let res: GetSuggestionsResponse | null = null;
+  try {
+    res = (await chrome.tabs.sendMessage(tabId, { type: 'GET_SUGGESTIONS' }, { frameId: 0 })) as GetSuggestionsResponse;
+  } catch {
+    res = null;
+  }
+  const rec = await loadSite(origin);
+  const enabled = typeof rec?.scanEnabled === 'boolean' ? rec.scanEnabled : settings.scanDefault;
+  const n = res?.suggestions.length ?? 0;
+  if (enabled && res) {
+    const more = res.total > n ? '+' : '';
+    const text = n ? `${n}${more} suggestion${n === 1 && !more ? '' : 's'} on this page` : res.scanning ? 'Scanning…' : 'No suggestions on this page.';
+    const row = h('div', { class: 'row' }, h('span', { class: n ? 'suggest-count' : 'muted' }, text));
+    if (n) {
+      row.append(
+        h(
+          'button',
+          {
+            class: 'primary',
+            onclick: async () => {
+              await chrome.tabs.sendMessage(tabId, { type: 'COVER_SUGGESTIONS' }, { frameId: 0 });
+              render();
+            },
+          },
+          'Cover all',
+        ),
+        h(
+          'button',
+          {
+            onclick: async () => {
+              await chrome.tabs.sendMessage(tabId, { type: 'REVIEW_SUGGESTIONS' }, { frameId: 0 });
+              window.close();
+            },
+          },
+          'Review',
+        ),
+      );
+    }
+    box.append(row);
+  }
+  box.append(
+    h(
+      'label',
+      { class: 'pause' },
+      h('input', {
+        type: 'checkbox',
+        checked: enabled,
+        onchange: async (e: Event) => {
+          const cur = (await loadSite(origin)) ?? { v: 1 as const, origin, enabled: true, stickers: [], updatedAt: 0 };
+          await saveSite({ ...cur, scanEnabled: (e.target as HTMLInputElement).checked, updatedAt: Date.now() });
+          setTimeout(render, 150);
+        },
+      }),
+      ' Suggest stickers on this site',
+    ),
+  );
+  return box;
 }
 
 async function render() {
@@ -190,7 +299,8 @@ async function render() {
   const settings = await loadSettings();
   app.replaceChildren(h('h1', {}, 'AI Blocker Stickers'));
   let tabLocked = false;
-  const finish = () => app.append(sessionSection(session), settingsSection(settings, tabLocked || session?.active === true), audit);
+  let autoCount = 0;
+  const finish = () => app.append(sessionSection(session, autoCount), settingsSection(settings, tabLocked || session?.active === true), audit);
 
   if (!tab?.id || !origin) {
     app.append(h('p', { class: 'muted' }, 'Stickers work on http(s) pages only.'));
@@ -243,8 +353,18 @@ async function render() {
   const state: TabState = content.state;
   const locked = state.locked === true;
   tabLocked = locked;
+  autoCount = state.autoCount ?? 0;
   const lockTitle = locked ? lockMessage(state.lockReason) : '';
   if (locked) app.append(h('p', { class: 'locked' }, `Locked: ${lockTitle}. Stickers stay on.`));
+  if (autoCount > 0) {
+    app.append(
+      h(
+        'p',
+        { class: 'hint' },
+        `${autoCount} sensitive number${autoCount === 1 ? ' was' : 's were'} covered automatically on this page${locked ? ' during the lock' : ''}. They are kept only if you choose to when the session ends.`,
+      ),
+    );
+  }
   const strictCount = state.strictInputs ?? 0;
   if (strictCount > 0) {
     app.append(
@@ -297,6 +417,7 @@ async function render() {
     ),
   );
   app.append(actions);
+  if (!locked) app.append(await suggestionsSection(tabId, origin, settings));
 
   const list = h('ul', { class: 'list' });
   if (content.stickers.length === 0) list.append(h('li', { class: 'muted' }, 'No stickers on this page.'));
@@ -351,7 +472,8 @@ function scopeSelect(tabId: number, s: StickerSummary, locked: boolean, lockTitl
 
 function stickerRow(tabId: number, s: StickerSummary, locked: boolean, lockTitle: string): HTMLElement {
   const dot = h('span', { class: `dot ${s.status}`, title: s.status });
-  const name = h('span', { class: 'name' }, s.label || (s.kind === 'rect' ? 'Rectangle' : 'Element'));
+  const kindName = s.kind === 'rect' ? 'Rectangle' : s.source === 'session-auto' ? 'Auto-covered' : s.source === 'suggest' ? 'Suggested' : 'Element';
+  const name = h('span', { class: 'name' }, s.label || kindName);
   const scope = scopeSelect(tabId, s, locked, lockTitle);
   const locate = h('button', { class: 'small', onclick: () => chrome.tabs.sendMessage(tabId, { type: 'LOCATE_STICKER', id: s.id }) }, 'Show');
   const del = h(

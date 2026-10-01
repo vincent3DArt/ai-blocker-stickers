@@ -125,3 +125,13 @@ export async function buildFingerprint(el: Element): Promise<Fingerprint> {
   }
   return fp;
 }
+
+/**
+ * Identity of an auto-suggest suggestion (pattern, element path, label), so a
+ * dismissal can be remembered without storing any of it. Same per-install key
+ * as the fingerprints, domain-separated.
+ */
+export async function suggestionHmacOf(identity: string): Promise<string | undefined> {
+  if (!hmacKey) return undefined;
+  return hmacHex(hmacKey, 'suggest\u0000' + identity);
+}

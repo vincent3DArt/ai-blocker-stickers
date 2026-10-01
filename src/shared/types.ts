@@ -101,7 +101,12 @@ export interface Fingerprint {
 
 export type MaskMode = 'text' | 'input' | 'visual-only';
 
-export type StickerSource = 'manual' | 'selection' | 'context-menu' | 'rect';
+/**
+ * How a sticker was placed. `suggest`: the user covered an auto-suggest
+ * suggestion. `session-auto`: covered automatically while the tab was locked;
+ * kept in memory only, unless the user keeps it when the AI session ends.
+ */
+export type StickerSource = 'manual' | 'selection' | 'context-menu' | 'rect' | 'suggest' | 'session-auto';
 
 export interface StickerScope {
   /** Segment glob: `*` matches one segment, `**` matches the rest. */
@@ -171,7 +176,18 @@ export interface SiteRecord {
   enabled: boolean;
   stickers: Sticker[];
   updatedAt: number;
+  /** Auto-suggest on this site. Absent: `Settings.scanDefault`. */
+  scanEnabled?: boolean;
+  /**
+   * Suggestions the user dismissed on this site, as HMACs (per-install key)
+   * of pattern + element path + label. Never the matched text.
+   */
+  dismissedSuggestions?: string[];
 }
+
+/** Auto-suggest sensitivity (see `accepts` in content/detect/patterns.ts). */
+export type ScanSensitivity = 'labeled-only' | 'balanced' | 'aggressive';
+export const SCAN_SENSITIVITIES: readonly ScanSensitivity[] = ['labeled-only', 'balanced', 'aggressive'];
 
 export interface KeyCombo {
   ctrl?: boolean;
@@ -201,6 +217,9 @@ export interface Settings {
    * `locked` (default): only while the AI-session lock is on.
    */
   strictInputs: StrictInputsMode;
+  /** Auto-suggest on sites that have no per-site choice yet. */
+  scanDefault: boolean;
+  scanSensitivity: ScanSensitivity;
 }
 
 export type StrictInputsMode = 'locked' | 'always' | 'never';
@@ -220,6 +239,8 @@ export const DEFAULT_SETTINGS: Settings = {
   },
   ghostAnchors: true,
   strictInputs: 'locked',
+  scanDefault: true,
+  scanSensitivity: 'balanced',
 };
 
 /** Fill in defaults and drop unknown values from a stored (possibly partial or stale) settings object. */
@@ -233,6 +254,10 @@ export function normalizeSettings(s: Partial<Settings> | undefined | null): Sett
     strictInputs: STRICT_INPUTS_MODES.includes(src.strictInputs as StrictInputsMode)
       ? (src.strictInputs as StrictInputsMode)
       : DEFAULT_SETTINGS.strictInputs,
+    scanDefault: typeof src.scanDefault === 'boolean' ? src.scanDefault : DEFAULT_SETTINGS.scanDefault,
+    scanSensitivity: SCAN_SENSITIVITIES.includes(src.scanSensitivity as ScanSensitivity)
+      ? (src.scanSensitivity as ScanSensitivity)
+      : DEFAULT_SETTINGS.scanSensitivity,
   };
 }
 
@@ -256,6 +281,10 @@ export interface TabState {
   lockReason?: LockReason;
   /** Covered text fields whose `.value` currently holds bullets (strict input masking). */
   strictInputs?: number;
+  /** Auto-suggest suggestions waiting on this page (unlocked only). */
+  suggestionCount?: number;
+  /** Stickers covered automatically during this lock, not yet kept or discarded. */
+  autoCount?: number;
 }
 
 export const DEFAULT_TAB_STATE: TabState = {

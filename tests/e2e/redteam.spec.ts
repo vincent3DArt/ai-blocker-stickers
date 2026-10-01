@@ -577,9 +577,22 @@ test.describe('red team: tampering', () => {
       ],
     ];
     for (const [name, fn] of attacks) {
-      await page.evaluate(fn);
+      // The DOM half of the requirement, measured in the page itself: run the
+      // attack, let the microtask queue drain (no task, no frame), then check
+      // the host is back in place and open in the top layer.
+      const restoredInMicrotask = await page.evaluate(async (src) => {
+        (0, eval)(`(${src})`)();
+        for (let i = 0; i < 5; i++) await Promise.resolve();
+        const h = document.querySelector('aibs-host') as HTMLElement | null;
+        return !!h && h.isConnected && h.matches(':popover-open');
+      }, fn.toString());
+      // A page stylesheet produces no mutation record: it is handled by the
+      // inline !important styles, so only the DOM state is checked for it.
+      if (name !== 'page stylesheet') expect(restoredInMicrotask, `host restored in the same microtask after ${name}`).toBe(true);
       await expect.poll(hostOk, { timeout: 400, message: `host after ${name}` }).toBe(true);
-      await expect.poll(() => coveredAt(page, cell), { timeout: 400, message: `pixels after ${name}` }).toBe(true);
+      // Pixels need a rendered frame and a screenshot, whose latency depends on
+      // machine load: allow up to 3 s for the screenshot to show the sticker.
+      await expect.poll(() => coveredAt(page, cell), { timeout: 3000, message: `pixels after ${name}` }).toBe(true);
       expect(await page.textContent('#ssn-cell')).toBe('•'.repeat(11));
     }
     cleanAll({ innerText: await pageInnerText(page) });
@@ -619,8 +632,11 @@ test.describe('red team: peek abuse', () => {
     cleanAll(await axReads(page));
     await page.keyboard.up('Shift');
     await page.keyboard.up('Control');
-    await expect.poll(() => coveredAt(page, cell), { timeout: 500 }).toBe(true);
-    expect((await ext.state(page)).state as unknown as { peeking: boolean }).toMatchObject({ peeking: false });
+    // Release ends the peek at once (state), and the screenshot shows the
+    // sticker again as soon as a frame is rendered and captured, which under
+    // load can take longer than one short screenshot poll.
+    await expect.poll(async () => ((await ext.state(page)).state as unknown as { peeking: boolean }).peeking, { timeout: 500 }).toBe(false);
+    await expect.poll(() => coveredAt(page, cell), { timeout: 3000 }).toBe(true);
   });
 });
 

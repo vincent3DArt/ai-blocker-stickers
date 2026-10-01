@@ -114,3 +114,17 @@ describe('H1: saving never trips over a record id', () => {
     store.destroy();
   });
 });
+
+describe('auto-suggest records', () => {
+  it('a sticker whose random UUID starts with digit-only groups is still storable', () => {
+    expect(() => assertNoCoveredText(record({ ...sticker, id: '36069472-3493-4228-8b26-25f7e01ce238' }))).not.toThrow();
+  });
+
+  it('dismissed suggestions are kept only as HMACs', async () => {
+    const { data } = mockChrome();
+    const hmac = 'ab'.repeat(32);
+    const rec: SiteRecord = { ...record(sticker), dismissedSuggestions: [hmac, '123-45-6789', 'not hex'] };
+    await saveSite(rec);
+    expect((data[siteKey(rec.origin)] as SiteRecord).dismissedSuggestions).toEqual([hmac]);
+  });
+});

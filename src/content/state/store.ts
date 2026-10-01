@@ -1,5 +1,5 @@
 import type { SiteRecord, Sticker } from '@/shared/types';
-import { loadSite, saveSite, siteKey } from '@/shared/storage';
+import { cleanDismissed, loadSite, saveSite, siteKey } from '@/shared/storage';
 import { matchesPath } from '@/shared/url-match';
 
 /**
@@ -10,6 +10,9 @@ import { matchesPath } from '@/shared/url-match';
  */
 export class SiteStore {
   private record: SiteRecord;
+  private ephemeral = new Map<string, Sticker>();
+  /** `updatedAt` of every write this store made that storage has not echoed back yet. */
+  private ownWrites = new Set<number>();
   private saveTimer = 0;
   private listeners = new Set<(rec: SiteRecord) => void>();
   private saveErrorLogged = false;
@@ -27,7 +30,10 @@ export class SiteStore {
     if (!c) return;
     const next = c.newValue as SiteRecord | undefined;
     if (!next || next.v !== 1) return;
-    if (next.updatedAt === this.record.updatedAt) return; // our own write
+    // Our own write. Compared against every write still in flight, not just
+    // the latest: with two saves in flight, the first one's change event would
+    // otherwise look remote and roll the record back to its older copy.
+    if (next.updatedAt === this.record.updatedAt || this.ownWrites.delete(next.updatedAt)) return;
     this.record = next;
     this.listeners.forEach((l) => l(next));
   };
@@ -55,16 +61,21 @@ export class SiteStore {
     return this.record.enabled;
   }
 
-  /** Stickers that apply to this frame and path. */
+  /** Stickers that apply to this frame and path, session-scoped ones included. */
   active(pathname: string, frameDepth: number): Sticker[] {
-    return this.record.stickers.filter((s) => s.frame.depth === frameDepth && matchesPath(s.scope.pathPattern, pathname));
+    const applies = (s: Sticker) => s.frame.depth === frameDepth && matchesPath(s.scope.pathPattern, pathname);
+    return [...this.record.stickers.filter(applies), ...Array.from(this.ephemeral.values()).filter(applies)];
   }
 
   get(id: string): Sticker | undefined {
-    return this.record.stickers.find((s) => s.id === id);
+    return this.ephemeral.get(id) ?? this.record.stickers.find((s) => s.id === id);
   }
 
   upsert(sticker: Sticker) {
+    if (this.ephemeral.has(sticker.id)) {
+      this.ephemeral.set(sticker.id, sticker);
+      return;
+    }
     const i = this.record.stickers.findIndex((s) => s.id === sticker.id);
     if (i >= 0) this.record.stickers[i] = sticker;
     else this.record.stickers.push(sticker);
@@ -72,7 +83,52 @@ export class SiteStore {
   }
 
   remove(id: string) {
+    if (this.ephemeral.delete(id)) return;
     this.record.stickers = this.record.stickers.filter((s) => s.id !== id);
+    this.scheduleSave();
+  }
+
+  // ---- session-scoped stickers (auto-covered while locked) ----
+
+  /** Kept in memory only: never written to storage unless `keepEphemeral` is called. */
+  addEphemeral(sticker: Sticker) {
+    this.ephemeral.set(sticker.id, sticker);
+  }
+
+  isEphemeral(id: string): boolean {
+    return this.ephemeral.has(id);
+  }
+
+  get ephemeralIds(): string[] {
+    return Array.from(this.ephemeral.keys());
+  }
+
+  /** The user kept the session's auto-covered stickers: they become ordinary stored stickers. */
+  keepEphemeral(): string[] {
+    const ids = this.ephemeralIds;
+    if (!ids.length) return ids;
+    for (const s of this.ephemeral.values()) this.record.stickers.push(s);
+    this.ephemeral.clear();
+    this.scheduleSave();
+    return ids;
+  }
+
+  // ---- auto-suggest ----
+
+  /** Per-site choice, or undefined when the site follows `Settings.scanDefault`. */
+  get scanEnabled(): boolean | undefined {
+    return typeof this.record.scanEnabled === 'boolean' ? this.record.scanEnabled : undefined;
+  }
+
+  get dismissed(): ReadonlySet<string> {
+    return new Set(this.record.dismissedSuggestions ?? []);
+  }
+
+  dismiss(hmac: string) {
+    if (!/^[0-9a-f]{64}$/.test(hmac)) return;
+    const list = this.record.dismissedSuggestions ?? [];
+    if (list.includes(hmac)) return;
+    this.record = { ...this.record, dismissedSuggestions: cleanDismissed([...list, hmac]) };
     this.scheduleSave();
   }
 
@@ -99,7 +155,9 @@ export class SiteStore {
   async flush(): Promise<boolean> {
     if (this.saveTimer) clearTimeout(this.saveTimer);
     this.saveTimer = 0;
-    this.record = { ...this.record, updatedAt: Date.now() };
+    this.record = { ...this.record, updatedAt: Math.max(Date.now(), this.record.updatedAt + 1) };
+    this.ownWrites.add(this.record.updatedAt);
+    if (this.ownWrites.size > 50) this.ownWrites.delete(this.ownWrites.values().next().value!);
     let ok: boolean;
     try {
       const { dropped } = await saveSite(this.record);

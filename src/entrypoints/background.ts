@@ -5,7 +5,6 @@ import { parseOrigin, scriptId } from '@/shared/origin';
 import { AUDIT_KEY, SESSION_ACTIVE_KEY, appendAudit, computeLock, type AuditEntry } from '@/shared/lock';
 
 const CONTENT_SCRIPT = 'content-scripts/content.js';
-const DEV_FIXTURE_ORIGINS = ['http://127.0.0.1:4173', 'http://localhost:4173'];
 const ALL_SITES = '*://*/*';
 /** Script id for the all-sites registration made while an AI session runs. */
 const ALL_SITES_ID = 'aibs-all-sites';
@@ -15,8 +14,13 @@ const SESSION_KEY = 'aibsSession';
 const DEBUGGER_TABS_KEY = 'aibsDebuggerTabs';
 /** storage.local: keep the all-sites registration after the session ends. */
 const KEEP_ALL_SITES_KEY = 'keepAllSites';
-/** storage.local, development builds only: the e2e suite runs under Playwright, which is itself a debugger. */
-const DEV_NO_AUTO_LOCK = 'aibsNoAutoLock';
+/*
+ * Development-only values (the fixture origins, the `aibsNoAutoLock` storage
+ * flag that the e2e suite sets because Playwright is itself a debugger, and
+ * the TEST_SESSION message) appear only inside `if (import.meta.env.DEV)`
+ * blocks, as literals, so production builds drop them entirely
+ * (scripts/check-prod-bundle.mjs).
+ */
 const POLL_MS = 2_000;
 const POLL_ALARM = 'aibs-lock-poll';
 
@@ -88,7 +92,7 @@ async function reconcile(): Promise<void> {
     wanted.add(scriptId(origin));
   }
   if (import.meta.env.DEV) {
-    for (const o of DEV_FIXTURE_ORIGINS) {
+    for (const o of ['http://127.0.0.1:4173', 'http://localhost:4173']) {
       if (await hasOriginPermission(o)) {
         await registerOrigin(o);
         wanted.add(scriptId(o));
@@ -125,9 +129,10 @@ const lock = {
 };
 
 async function loadLock(): Promise<void> {
-  const [ses, loc] = await Promise.all([
+  const [ses, loc, devLoc] = await Promise.all([
     chrome.storage.session.get(null),
-    chrome.storage.local.get([SESSION_ACTIVE_KEY, DEV_NO_AUTO_LOCK]),
+    chrome.storage.local.get(SESSION_ACTIVE_KEY),
+    import.meta.env.DEV ? chrome.storage.local.get('aibsNoAutoLock') : Promise.resolve({} as Record<string, unknown>),
   ]);
   const s = ses[SESSION_KEY] as { active?: boolean; startedAt?: number } | undefined;
   // Fail closed: either copy saying "active" keeps the session on. The local
@@ -140,7 +145,7 @@ async function loadLock(): Promise<void> {
   for (const [k, v] of Object.entries(ses)) {
     if (k.startsWith('tab:') && (v as TabState | undefined)?.stickerCount) lock.stickerTabs.add(Number(k.slice(4)));
   }
-  lock.noAutoLock = import.meta.env.DEV && loc[DEV_NO_AUTO_LOCK] === true;
+  lock.noAutoLock = import.meta.env.DEV && devLoc.aibsNoAutoLock === true;
 }
 
 const ready = loadLock().catch(() => {});
@@ -269,7 +274,7 @@ async function startSession(allSites: boolean): Promise<void> {
   void ensurePolling();
 }
 
-async function endSession(keepAllSites: boolean): Promise<void> {
+async function endSession(keepAllSites: boolean, keepAuto = true): Promise<void> {
   await ready;
   lock.session = false;
   lock.startedAt = 0;
@@ -277,6 +282,12 @@ async function endSession(keepAllSites: boolean): Promise<void> {
   await chrome.storage.local.set({ [SESSION_ACTIVE_KEY]: false, [KEEP_ALL_SITES_KEY]: keepAllSites });
   if (!keepAllSites) await unregisterId(ALL_SITES_ID);
   await audit({ action: 'session-end' });
+  // Every tab decides about the stickers it auto-covered during the session:
+  // stored for good, or dropped once its lock is really off.
+  const tabs = await chrome.tabs.query({});
+  await Promise.all(
+    tabs.map((t) => (t.id === undefined ? undefined : chrome.tabs.sendMessage(t.id, { type: 'SESSION_ENDED', keepAuto }).catch(() => undefined))),
+  );
   await pushLockAll();
 }
 
@@ -372,14 +383,32 @@ export default defineBackground(() => {
 
   if (import.meta.env.DEV) {
     chrome.storage.onChanged.addListener((changes, area) => {
-      if (area !== 'local' || !(DEV_NO_AUTO_LOCK in changes)) return;
-      lock.noAutoLock = changes[DEV_NO_AUTO_LOCK].newValue === true;
+      if (area !== 'local' || !('aibsNoAutoLock' in changes)) return;
+      lock.noAutoLock = changes.aibsNoAutoLock.newValue === true;
       void poll();
     });
   }
 
   chrome.runtime.onMessage.addListener((raw: unknown, sender, sendResponse) => {
     const msg = raw as { type: string; [k: string]: unknown };
+    // Development builds only: start or end the manual session without the
+    // popup's prompts. Dropped, message name included, from production builds.
+    if (import.meta.env.DEV && msg.type === 'TEST_SESSION') {
+      if (!fromExtensionUrl(sender)) {
+        sendResponse({ ok: false, error: 'sender not allowed' });
+        return undefined;
+      }
+      (async () => {
+        try {
+          if (msg.active === true) await startSession(false);
+          else await endSession(false, msg.keepAuto !== false);
+          sendResponse({ ok: true, session: await sessionInfo() });
+        } catch (e) {
+          sendResponse({ ok: false, error: e instanceof Error ? e.message : String(e) });
+        }
+      })();
+      return true;
+    }
     switch (msg.type) {
       case 'TAB_STATUS': {
         const tabId = sender.tab?.id;
@@ -408,24 +437,15 @@ export default defineBackground(() => {
       }
       case 'START_SESSION':
       case 'END_SESSION':
-      case 'GET_SESSION':
-      case 'TEST_SESSION': {
+      case 'GET_SESSION': {
         if (!fromExtensionUrl(sender)) {
           sendResponse({ ok: false, error: 'sender not allowed' });
-          return undefined;
-        }
-        if (msg.type === 'TEST_SESSION' && !import.meta.env.DEV) {
-          sendResponse({ ok: false, error: 'development builds only' });
           return undefined;
         }
         (async () => {
           try {
             if (msg.type === 'START_SESSION') await startSession(msg.allSites === true);
-            else if (msg.type === 'END_SESSION') await endSession(msg.keepAllSites === true);
-            else if (msg.type === 'TEST_SESSION') {
-              if (msg.active === true) await startSession(false);
-              else await endSession(false);
-            }
+            else if (msg.type === 'END_SESSION') await endSession(msg.keepAllSites === true, msg.keepAuto !== false);
             sendResponse({ ok: true, session: await sessionInfo() });
           } catch (e) {
             sendResponse({ ok: false, error: e instanceof Error ? e.message : String(e) });

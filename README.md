@@ -9,7 +9,8 @@ stays covered. The extension defends in two layers at once. An opaque overlay si
 top layer, so screenshot-driven agents see a solid block instead of the number. At the same time the
 covered content is rewritten in the real DOM: text nodes become bullets, attributes are blanked, and
 the region is marked `aria-hidden`, so page-reading agents get nothing useful either. Each layer
-backs up the other. Phase 1 is manual placement only.
+backs up the other. You place stickers by hand, or accept the ones the extension suggests for
+numbers that look sensitive; during an AI session it covers those on its own.
 
 ## How a sticker stays put
 
@@ -106,6 +107,44 @@ The popup's "Lock activity" section shows the last five lock events: session sta
 auto-lock and unlock, and refused actions. The log keeps 200 entries and records only the origin
 and the action, never covered text.
 
+**Suggestions.** Once a page has loaded, the extension scans it in idle time for numbers that look
+sensitive: SSNs and ITINs, EINs, bank routing and account numbers, IBANs, card numbers, dates of
+birth, and masked last-four values such as `***-**-1234`. Every pattern has a validator (SSA number
+ranges, the ABA checksum, mod-97 for IBANs, Luhn plus a known issuer prefix for cards), and phone
+numbers, ZIP+4 codes, dates, UUIDs, hashes and link targets are ruled out first. A nearby label
+("SSN", "Routing", "Account number", a table header, a `<label>`, an `autocomplete` token) raises
+a match's score. Numbers split across inline elements are joined before matching. Each suggestion
+gets a dashed amber outline and a small chip with **Cover** and **×**. The outline never takes
+clicks; only the chip does. Cover turns it into an ordinary element sticker. × dismisses it on this
+site for good. The dismissal is stored as an HMAC of the pattern, the element's position and its
+label, never the number. In edit mode the toolbar shows "Suggestions (n)" and steps through them.
+Text fields are checked by value in memory: every field against the strong patterns, labelled
+fields against all of them.
+
+The popup shows how many suggestions the page has, with **Cover all** and **Review**, and a switch
+to turn suggestions off for the site. Under **Settings**, "Suggest stickers on new sites" sets the
+default and the sensitivity picks the threshold:
+
+- *Labeled only*: only numbers right next to a matching label.
+- *Balanced* (default): strong patterns (SSN format, ITIN, card, IBAN) on their own; EIN, routing
+  and masked numbers with any nearby label; bare nine-digit numbers, account numbers and dates of
+  birth only next to their label.
+- *Aggressive*: EIN, routing and masked numbers without a label too.
+
+A page shows at most 200 suggestions, and a scan stops after 20,000 text nodes. Chunks stay under
+the browser's long-task limit, visible content is scanned first, and changed content is rescanned
+750 ms after it settles.
+
+**During an AI session.** While a tab is locked, no suggestion or chip is ever drawn. Every
+detection at or above the balanced threshold is covered at once instead, as a session sticker,
+whether or not suggestions are on for the site. Content that arrives while locked is checked inside
+the mutation callback that reports it, before the browser can paint it: strong patterns always, and
+every pattern when the block already shows a keyword label. This does not depend on animation frames
+or tab visibility, so it works in a background tab an agent drives. Session stickers live in memory
+only. When you end the session, the popup asks "Keep N auto-covered stickers?". OK (the default)
+stores them like any other sticker; Cancel removes them once the lock is off. The popup lists them
+as "Auto-covered" in the meantime.
+
 **Scope.** Each sticker is scoped to a URL path pattern. The default replaces an ID-like last
 segment with a wildcard, so `/clients/123` becomes `/clients/*`. The popup also offers an exact path
 or the whole site.
@@ -179,6 +218,14 @@ Playwright is itself a debugger on every tab and sets `navigator.webdriver`, so 
 permanently locked. The development build honours a storage flag that turns auto-lock off, and the
 test fixture sets it. `tests/e2e/lock.spec.ts` clears it to test the lock.
 
+The fixture also turns the auto-suggest scanner off with a second development-only flag, so the
+other suites see no chips and no auto-covers. `tests/e2e/suggest.spec.ts` turns it back on. It
+checks the suggestions on `static.html`, that `fixtures/fp-corpus.html` (phones, dates, ZIP+4
+codes, order and tracking numbers, UUIDs) gets none, that a locked SPA route is covered before
+its SSN can be read, and that `fixtures/big-table.html` (5000 generated rows) scans with no long
+task in under 2 seconds. `tests/unit/detect.test.ts` measures precision and recall on a labelled
+corpus built from the fixtures.
+
 The main anchoring test uses the layout-shift matrix fixture at `fixtures/layout-shift.html`. Its
 buttons reproduce each row of the design's layout matrix: insert content above, reorder columns,
 swap fonts, toggle a responsive breakpoint, move a cell into a modal, re-render with new class
@@ -188,11 +235,6 @@ target and nothing else.
 **Test data.** Every SSN, EIN, and account number in `fixtures/` is invented. None of them is a real
 identifier. `pnpm scan` checks the rest of the repository for real-looking numbers, keys, and email
 addresses, and CI runs it on every push.
-
-## Roadmap (Phase 2)
-
-- **Auto-suggest scanner.** Idle-chunked scanning for SSN, EIN, routing, account, IBAN, card, and
-  date-of-birth patterns, with validators and label keywords, offered as dashed suggestion chips.
 
 ## License
 

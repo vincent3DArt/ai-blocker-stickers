@@ -36,8 +36,19 @@ export function sanitizeForSave(rec: SiteRecord): { rec: SiteRecord; dropped: st
     }
   });
   const safe: SiteRecord = { ...rec, stickers };
+  // Dismissals are skipped by the leak scan (HMACs), so only HMAC-shaped entries are kept.
+  if (rec.dismissedSuggestions) safe.dismissedSuggestions = cleanDismissed(rec.dismissedSuggestions);
   assertNoCoveredText(safe);
   return { rec: safe, dropped };
+}
+
+export const DISMISSED_CAP = 500;
+
+/** HMAC-shaped (64 lowercase hex) entries only, newest `DISMISSED_CAP` kept. */
+export function cleanDismissed(list: unknown): string[] {
+  if (!Array.isArray(list)) return [];
+  const out = list.filter((v): v is string => typeof v === 'string' && /^[0-9a-f]{64}$/.test(v));
+  return out.length > DISMISSED_CAP ? out.slice(out.length - DISMISSED_CAP) : out;
 }
 
 /**
@@ -97,11 +108,17 @@ const LEAK_PATTERNS = [/\b\d{3}[- ]\d{2}[- ]\d{4}\b/, /\b\d{2}-\d{7}\b/, /\b\d{9
  * timestamp, a length or a layout coordinate (an epoch in milliseconds is 13
  * digits, and matching it here used to abort every single save).
  */
-const HMAC_KEYS = new Set(['textHmac', 'keyHmac', 'idHmac', 'testIdHmac', 'nameHmac']);
+const HMAC_KEYS = new Set(['textHmac', 'keyHmac', 'idHmac', 'testIdHmac', 'nameHmac', 'dismissedSuggestions']);
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 export function assertNoCoveredText(rec: SiteRecord): void {
   const visit = (value: unknown, path: string): void => {
     if (typeof value === 'string') {
+      // Sticker ids are random UUIDs, and one whose leading groups happen to
+      // be all digits ("36069472-3493-4228-…") reads as a card number to the
+      // patterns below: the sticker was silently left out of storage.
+      if (UUID.test(value)) return;
       for (const re of LEAK_PATTERNS) {
         if (re.test(value)) {
           throw new Error(`Privacy invariant violated: stored field ${path || 'record'} matches ${re}`);

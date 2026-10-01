@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Fixture: false-positive corpus</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 0; padding: 16px; max-width: 900px; }
+  table { border-collapse: collapse; width: 100%; margin: 12px 0; }
+  th, td { border: 1px solid #ccc; padding: 4px 8px; text-align: left; }
+  dt { font-weight: 600; }
+</style>
+</head>
+<body>
+<!--
+  Numbers that look sensitive but are not: phones, dates, ZIP+4 codes, order
+  and invoice numbers, UUIDs, commit hashes, tracking numbers. The auto-suggest
+  scanner must not flag anything on this page. All values are invented.
+-->
+<h1>Order history</h1>
+<p>Questions? Call us at (555) 010-4477 or 555-010-9911, or text 555.010.2288. International: +1 555 010 3344.</p>
+<p>Our warehouse: 1200 Harbor Way, Springfield, 94107-1234. Returns go to 10001-0042.</p>
+
+<table id="orders">
+  <thead><tr><th>Order number</th><th>Placed</th><th>Tracking number</th><th>Total</th></tr></thead>
+  <tbody>
+    <tr><td>112-4567890-1234567</td><td>03-14-2024</td><td>1Z999AA10123456784</td><td>$1,234.56</td></tr>
+    <tr><td>113-9876543-7654321</td><td>2024-05-02</td><td>9400111899223197428490</td><td>$89.10</td></tr>
+    <tr><td>#123456789</td><td>11.30.2023</td><td>123456789012</td><td>$12,500.00</td></tr>
+    <tr><td>#987654320</td><td>07/04/2023</td><td>123456789012345</td><td>$3.99</td></tr>
+    <tr><td>WEB-2024-000177</td><td>12/31/2022</td><td>JD014600006281234567</td><td>$45.00</td></tr>
+  </tbody>
+</table>
+
+<h2>Invoices</h2>
+<ul>
+  <li>Invoice INV-2024-00017 issued 2024-01-15, due 02-15-2024.</li>
+  <li>Invoice #20240312 for 1,250 units at 14.99 each.</li>
+  <li>Reference 7f3c9a2e-4b1d-4c8e-9a6f-0d2e5b7c1a93 (keep for your records).</li>
+  <li>Build a3f9c2d81b7e deployed; checksum 5d41402abc4b2a76b9719d911017c592.</li>
+  <li>Case 000123456 opened 5/6/2021 at 10:42.</li>
+</ul>
+
+<h2>Contact</h2>
+<dl>
+  <dt>Phone</dt><dd>(555) 010-7788</dd>
+  <dt>Fax</dt><dd>555-010-6655</dd>
+  <dt>Postal code</dt><dd>30301-4455</dd>
+  <dt>Member since</dt><dd>04/18/2015</dd>
+  <dt>Loyalty ID</dt><dd>48213377</dd>
+  <dt>Appointment</dt><dd>12/05/2025 at 3:30 pm</dd>
+</dl>
+
+<h2>Stats</h2>
+<p>We shipped 1234567 parcels in 2023, 98.7% on time. Population 8336817. Serial SN-000045671234.</p>
+<p>Coordinates 40.712776, -74.005974. ISBN 978-0-306-40615-7. Version 10.0.19045.3693.</p>
+<p>Timestamp 1716239022123 and 2024-05-20T21:03:42Z. Color #1f2937, id user_12345678.</p>
+<p>Price range $100,000 - $250,000. Quantity 4,000,000. Year 2019-2024. Room 1201-1205.</p>
+<p>See <a href="https://shop.example.com/orders/123456789">order 123456789</a> for details.</p>
+<p>Tracking: <span>1Z</span><span>999AA1</span><span>0123456784</span>. Gift card code ABCD-EFGH-1234.</p>
+</body>
+</html>

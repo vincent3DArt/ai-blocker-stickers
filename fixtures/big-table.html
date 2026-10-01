@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Fixture: big table</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 0; padding: 16px; }
+  table { border-collapse: collapse; }
+  th, td { border: 1px solid #ddd; padding: 2px 6px; font-size: 12px; }
+</style>
+</head>
+<body>
+<h1>Accounts (5000 rows, generated, all values invented)</h1>
+<table id="big">
+  <thead><tr><th>#</th><th>Name</th><th>Account number</th><th>SSN</th><th>Balance</th></tr></thead>
+  <tbody id="rows"></tbody>
+</table>
+<script>
+  // Built during the parse, so the rows exist before the load event and the
+  // scanner's first idle pass sees the whole table. Invented values only:
+  // SSN-format numbers in valid ranges, 10-digit account numbers.
+  (function () {
+    const rows = [];
+    for (let i = 0; i < 5000; i++) {
+      const area = 100 + (i % 500);
+      const group = 10 + (i % 89);
+      const serial = 1000 + (i % 8999);
+      const acct = String(4000000000 + i * 7919);
+      rows.push(
+        '<tr><td>' + (i + 1) + '</td><td>Client ' + (i + 1) + '</td><td class="acct">' + acct +
+        '</td><td class="ssn">' + area + '-' + group + '-' + serial + '</td><td>$' + (i * 13 % 9000) + '.00</td></tr>'
+      );
+    }
+    document.getElementById('rows').innerHTML = rows.join('');
+  })();
+</script>
+</body>
+</html>

@@ -117,3 +117,37 @@ close them by breaking the page.
     cannot be re-found by selector after a reload.
 11. **Frames.** Same-origin frames run their own copy of the content script.
     Cross-origin frames need their origin enabled separately.
+
+## Auto-suggest and the locked auto-cover
+
+12. **Detection is heuristic.** The scanner knows a fixed set of formats
+    (SSN, ITIN, EIN, ABA routing, account, IBAN, card, US-style date of
+    birth, masked last four). Anything else (passport and licence numbers
+    without a matching label, non-US identifiers, numbers in images or
+    canvases) is never suggested and never auto-covered. Account numbers,
+    bare nine-digit numbers and dates of birth need a label next to them.
+    A false negative while locked means that number is not covered: the
+    auto-cover adds protection, it is not a guarantee.
+13. **Scan limits.** A full scan stops after 20,000 text nodes and a page
+    shows at most 200 suggestions. Text inside shadow roots and the text
+    content of `<textarea>`/`<select>` elements are not block-scanned (text
+    fields are checked by value instead). A number written into a field by
+    script, with no `change` event, is seen at the next scan.
+14. **Pre-paint has a start-up window.** The locked check runs inside the
+    mutation callback, before paint, from the moment the content script has
+    read its settings. Content parsed before that (a few milliseconds after
+    `document_start`) is covered by the synchronous full pass that runs as
+    soon as the script is ready, not before its first paint. A MAIN-world
+    `MutationObserver` with `characterDataOldValue` still sees the raw text
+    in the record of the masking write (see 3).
+15. **Locked over-masks.** While locked, a number inside a long block with
+    no tighter element is covered by masking the whole block; on the body
+    itself only the matched characters are masked. More than 200 auto-covers
+    on one page are masked without an overlay sticker. The per-site
+    "Suggest" switch and dismissals do not apply while locked.
+16. **Session stickers are in memory.** Auto-covers made during a lock are
+    not stored until you keep them at the end of the session. A reload
+    during the session drops them and the page is scanned and covered again.
+17. **Dismissals.** A dismissal is an HMAC of pattern, element position and
+    label. If the page moves the number to a different position, it is
+    suggested again.

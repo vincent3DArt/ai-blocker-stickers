@@ -426,6 +426,18 @@ export class Masker {
     return !!this.recordFor(node);
   }
 
+  /** The element a whole-element mask is applied to (undefined for rect records and unknown ids). */
+  rootOf(id: string): Element | undefined {
+    const rec = this.records.get(id);
+    return rec && !rec.subset ? rec.root : undefined;
+  }
+
+  /** True when `el` is the root of a whole-element mask: the scanner skips its subtree. */
+  isMaskRoot(el: Element): boolean {
+    const rec = this.byRoot.get(el);
+    return !!rec && !rec.subset;
+  }
+
   private recordFor(node: Node): MaskRecord | undefined {
     if (node.nodeType === Node.TEXT_NODE) {
       for (const rec of this.records.values()) if (rec.texts.has(node as Text)) return rec;

@@ -1,6 +1,6 @@
 import type { OverlayHost } from './host';
 
-export type ToolbarAction = 'pick' | 'rect' | 'selection' | 'done';
+export type ToolbarAction = 'pick' | 'rect' | 'selection' | 'suggestions' | 'done';
 
 export interface ToolbarCallbacks {
   onAction(action: ToolbarAction): void;
@@ -37,6 +37,8 @@ export class Toolbar {
     add('pick', 'Cover element');
     add('rect', 'Draw rectangle');
     add('selection', 'Cover selection');
+    add('suggestions', 'Suggestions (0)');
+    this.buttons.get('suggestions')!.style.display = 'none';
     add('done', 'Done', 'primary');
   }
 
@@ -47,6 +49,14 @@ export class Toolbar {
   hide() {
     this.el.remove();
     this.setActive(null);
+  }
+
+  /** "Suggestions (n)": hidden when there are none. Clicking steps through them. */
+  setSuggestions(n: number, more = false) {
+    const b = this.buttons.get('suggestions');
+    if (!b) return;
+    b.textContent = `Suggestions (${n}${more ? '+' : ''})`;
+    b.style.display = n > 0 ? '' : 'none';
   }
 
   setActive(action: ToolbarAction | null) {

@@ -20,6 +20,7 @@
     "build:dev": "wxt build --mode development",
     "e2e": "wxt build --mode development && playwright test",
     "scan": "node scripts/scan-fixtures.mjs",
+    "check:prod": "node scripts/check-prod-bundle.mjs",
     "fixtures": "vite preview --outDir fixtures --port 4173 --strictPort",
     "postinstall": "wxt prepare"
   },
