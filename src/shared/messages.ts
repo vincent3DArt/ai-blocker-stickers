@@ -8,7 +8,9 @@ export type ContentToBackground =
   /** Ask for this tab's lock; also the keep-alive ping while stickers or a lock are present. */
   | { type: 'LOCK_SYNC' }
   /** A lifting action was refused while locked; the background appends an audit entry. */
-  | { type: 'LOCK_REFUSED'; what: string };
+  | { type: 'LOCK_REFUSED'; what: string }
+  /** Locked on a canvas-drawn page: the auto-cover has nothing to find. Audited with the origin only. */
+  | { type: 'CANVAS_PAGE' };
 
 /** Popup -> background. */
 export type PopupToBackground =

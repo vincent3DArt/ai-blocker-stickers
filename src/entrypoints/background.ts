@@ -168,6 +168,8 @@ async function pushLockAll() {
 
 // ---- audit log ----
 let auditChain: Promise<unknown> = Promise.resolve();
+/** `tabId|origin` pairs already logged as `canvas-page` (per service-worker life). */
+const canvasAudited = new Set<string>();
 /** Append one entry. Writes are serialised so concurrent events do not drop each other. */
 function audit(entry: Omit<AuditEntry, 'ts'>): Promise<unknown> {
   auditChain = auditChain
@@ -266,6 +268,7 @@ async function startSession(allSites: boolean): Promise<void> {
   await ready;
   lock.session = true;
   lock.startedAt = Date.now();
+  canvasAudited.clear();
   await chrome.storage.session.set({ [SESSION_KEY]: { active: true, startedAt: lock.startedAt } });
   await chrome.storage.local.set({ [SESSION_ACTIVE_KEY]: true });
   if (allSites && (await hasAllSites())) await registerScript(ALL_SITES_ID, [ALL_SITES]).catch(() => {});
@@ -433,6 +436,16 @@ export default defineBackground(() => {
         if (sender.id !== chrome.runtime.id || !sender.tab) break;
         const what = typeof msg.what === 'string' ? msg.what.replace(/[^\w:/ -]/g, '').slice(0, 40) : 'unknown';
         void audit({ action: 'unlock-refused', origin: originOfSender(sender), reason: what });
+        break;
+      }
+      case 'CANVAS_PAGE': {
+        // Top frame only, origin only (never the path), once per tab and origin.
+        if (sender.id !== chrome.runtime.id || !sender.tab || sender.frameId !== 0) break;
+        const origin = originOfSender(sender);
+        const key = `${sender.tab.id}|${origin ?? ''}`;
+        if (canvasAudited.has(key)) break;
+        canvasAudited.add(key);
+        void audit({ action: 'canvas-page', origin });
         break;
       }
       case 'START_SESSION':

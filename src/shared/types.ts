@@ -285,7 +285,15 @@ export interface TabState {
   suggestionCount?: number;
   /** Stickers covered automatically during this lock, not yet kept or discarded. */
   autoCount?: number;
+  /**
+   * How the page draws its content (content/detect/canvas-detect.ts). On
+   * 'canvas' pages the text is pixels: suggestions and Cover element cannot
+   * see it, and only Draw rectangle helps.
+   */
+  rendering: RenderingMode;
 }
+
+export type RenderingMode = 'dom' | 'canvas' | 'mixed';
 
 export const DEFAULT_TAB_STATE: TabState = {
   editMode: false,
@@ -295,4 +303,5 @@ export const DEFAULT_TAB_STATE: TabState = {
   peeking: false,
   saveError: false,
   locked: false,
+  rendering: 'dom',
 };

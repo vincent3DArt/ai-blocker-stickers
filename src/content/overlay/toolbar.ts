@@ -40,6 +40,30 @@ export class Toolbar {
     add('suggestions', 'Suggestions (0)');
     this.buttons.get('suggestions')!.style.display = 'none';
     add('done', 'Done', 'primary');
+    this.canvasHint = document.createElement('span');
+    this.canvasHint.className = 'hint canvas-hint';
+    this.canvasHint.textContent = 'Canvas page: text here is pixels. Use Draw rectangle.';
+  }
+
+  private canvasHint: HTMLSpanElement;
+  private canvas = false;
+  private suggestionCount = 0;
+
+  /**
+   * Canvas-drawn page: Cover element and Suggestions cannot see the text, so
+   * they are hidden and a one-line hint points at Draw rectangle.
+   */
+  setCanvas(on: boolean) {
+    if (this.canvas === on) return;
+    this.canvas = on;
+    this.buttons.get('pick')!.style.display = on ? 'none' : '';
+    if (on) this.el.appendChild(this.canvasHint);
+    else this.canvasHint.remove();
+    this.updateSuggestions();
+  }
+
+  get canvasMode(): boolean {
+    return this.canvas;
   }
 
   show() {
@@ -56,7 +80,13 @@ export class Toolbar {
     const b = this.buttons.get('suggestions');
     if (!b) return;
     b.textContent = `Suggestions (${n}${more ? '+' : ''})`;
-    b.style.display = n > 0 ? '' : 'none';
+    this.suggestionCount = n;
+    this.updateSuggestions();
+  }
+
+  private updateSuggestions() {
+    const b = this.buttons.get('suggestions');
+    if (b) b.style.display = this.suggestionCount > 0 && !this.canvas ? '' : 'none';
   }
 
   setActive(action: ToolbarAction | null) {

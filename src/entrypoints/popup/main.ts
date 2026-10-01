@@ -134,6 +134,7 @@ function describeAudit(e: AuditEntry): string {
     'auto-lock': 'Automation detected, locked',
     'auto-unlock': 'Automation gone, unlocked',
     'unlock-refused': 'Refused',
+    'canvas-page': 'Canvas page, nothing to auto-cover',
   };
   return `${when} ${what[e.action]}${e.reason ? ` (${e.reason})` : ''}${e.origin ? ` ${e.origin}` : ''}`;
 }
@@ -229,8 +230,15 @@ const SENSITIVITY_CHOICES: Array<{ value: ScanSensitivity; label: string; explai
   { value: 'aggressive', label: 'Aggressive', explain: 'Also EIN and routing-shaped numbers without a label. More false alarms.' },
 ];
 
-/** Suggestions waiting on this page: count, Cover all, Review, and the per-site switch. */
-async function suggestionsSection(tabId: number, origin: string, settings: Settings): Promise<HTMLElement> {
+const CANVAS_NOTE =
+  "This page draws its content on a canvas (for example Google Docs). Suggestions and Cover element can't see that text. Use Draw rectangle to cover it on screen.";
+const MIXED_NOTE = 'Part of this page is drawn on a canvas. Text there can only be covered with Draw rectangle.';
+
+/**
+ * Suggestions waiting on this page: count, Cover all, Review, and the per-site switch.
+ * On a canvas-drawn page the count is replaced by an explanation and the switch is disabled.
+ */
+async function suggestionsSection(tabId: number, origin: string, settings: Settings, canvas: boolean): Promise<HTMLElement> {
   const box = h('section', { class: 'suggest' });
   let res: GetSuggestionsResponse | null = null;
   try {
@@ -241,7 +249,9 @@ async function suggestionsSection(tabId: number, origin: string, settings: Setti
   const rec = await loadSite(origin);
   const enabled = typeof rec?.scanEnabled === 'boolean' ? rec.scanEnabled : settings.scanDefault;
   const n = res?.suggestions.length ?? 0;
-  if (enabled && res) {
+  if (canvas && n === 0) {
+    box.append(h('p', { class: 'hint canvas-note', id: 'canvas-note' }, CANVAS_NOTE));
+  } else if (enabled && res) {
     const more = res.total > n ? '+' : '';
     const text = n ? `${n}${more} suggestion${n === 1 && !more ? '' : 's'} on this page` : res.scanning ? 'Scanning…' : 'No suggestions on this page.';
     const row = h('div', { class: 'row' }, h('span', { class: n ? 'suggest-count' : 'muted' }, text));
@@ -275,10 +285,12 @@ async function suggestionsSection(tabId: number, origin: string, settings: Setti
   box.append(
     h(
       'label',
-      { class: 'pause' },
+      { class: 'pause', title: canvas ? 'This page is drawn on a canvas: there is no text to scan' : '' },
       h('input', {
         type: 'checkbox',
+        id: 'suggest-site',
         checked: enabled,
+        disabled: canvas,
         onchange: async (e: Event) => {
           const cur = (await loadSite(origin)) ?? { v: 1 as const, origin, enabled: true, stickers: [], updatedAt: 0 };
           await saveSite({ ...cur, scanEnabled: (e.target as HTMLInputElement).checked, updatedAt: Date.now() });
@@ -355,6 +367,7 @@ async function render() {
   tabLocked = locked;
   autoCount = state.autoCount ?? 0;
   const lockTitle = locked ? lockMessage(state.lockReason) : '';
+  const canvas = state.rendering === 'canvas';
   if (locked) app.append(h('p', { class: 'locked' }, `Locked: ${lockTitle}. Stickers stay on.`));
   if (autoCount > 0) {
     app.append(
@@ -394,8 +407,9 @@ async function render() {
     h(
       'button',
       {
-        disabled: locked,
-        title: lockTitle,
+        id: 'cover-element',
+        disabled: locked || canvas,
+        title: locked ? lockTitle : canvas ? "This page is drawn on a canvas: there are no elements to cover. Use Draw rectangle." : '',
         onclick: async () => {
           const res = await chrome.tabs.sendMessage(tabId, { type: 'START_PICK' }, { frameId: 0 });
           if (showRefusal(res)) window.close();
@@ -406,6 +420,8 @@ async function render() {
     h(
       'button',
       {
+        id: 'draw-rect',
+        class: canvas ? 'primary' : '',
         disabled: locked,
         title: lockTitle,
         onclick: async () => {
@@ -417,7 +433,9 @@ async function render() {
     ),
   );
   app.append(actions);
-  if (!locked) app.append(await suggestionsSection(tabId, origin, settings));
+  if (!locked) app.append(await suggestionsSection(tabId, origin, settings, canvas));
+  else if (canvas) app.append(h('p', { class: 'hint canvas-note', id: 'canvas-note' }, CANVAS_NOTE));
+  if (state.rendering === 'mixed') app.append(h('p', { class: 'hint', id: 'mixed-note' }, MIXED_NOTE));
 
   const list = h('ul', { class: 'list' });
   if (content.stickers.length === 0) list.append(h('li', { class: 'muted' }, 'No stickers on this page.'));

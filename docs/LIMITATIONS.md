@@ -151,3 +151,32 @@ close them by breaking the page.
 17. **Dismissals.** A dismissal is an HMAC of pattern, element position and
     label. If the page moves the number to a different position, it is
     suggested again.
+
+## Canvas-drawn pages
+
+18. **No DOM text to work on.** Google Docs, Sheets and Slides, Figma,
+    Excalidraw, Miro, Lucid, PDF viewers and other canvas or WebGL apps draw
+    the document onto a `<canvas>` (or into a plugin). What you read is
+    pixels. The scanner, Cover element, Cover selection and text masking
+    have nothing to act on. The extension detects these pages (a short list
+    of known apps by hostname, otherwise the share of the viewport covered
+    by `canvas` / PDF `embed` / `object` against the amount of visible DOM
+    text). The popup then explains this, disables Cover element and the
+    per-site Suggest switch, and makes Draw rectangle the main action. In
+    edit mode the toolbar hides Cover element and Suggestions.
+19. **A rectangle covers screenshots only.** On a canvas page a rectangle
+    sticker anchors to the canvas (or its wrapper) and follows it through
+    reloads and resizes, but it only hides pixels. Nothing in the DOM is
+    masked, because nothing there holds the text. The canvas pixels stay
+    readable through `getImageData` / `toDataURL` (see 6). Google Docs also
+    keeps the document text in its own JavaScript state, sends it over the
+    network, and exposes it through the Docs and Drive APIs and its
+    screen-reader / braille support mode (which adds an accessible text
+    copy of the document to the page). An agent with API access or with
+    accessibility mode turned on reads the document directly. That is
+    outside any extension's reach.
+20. **The locked auto-cover finds nothing.** While locked, a canvas page
+    gets no automatic covers. The lock still applies (badge, refusals,
+    rectangle stickers stay on), and the audit log records one `canvas-page`
+    entry per tab and session, with the origin only and never the path, so
+    you can see why nothing was covered.

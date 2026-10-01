@@ -18,6 +18,8 @@ import { Session } from './state/session';
 import { SpaNav } from './state/spa-nav';
 import { clientRects, union } from './anchor/geometry';
 import { Scanner } from './detect/scanner';
+import { knownCanvasApp, pageRenderingMode, type RenderingMode } from './detect/canvas-detect';
+import { onIdle } from './detect/scheduler';
 import { SuggestView } from './overlay/suggest-view';
 
 /*
@@ -29,6 +31,8 @@ import { SuggestView } from './overlay/suggest-view';
  */
 /** Keep-alive / resync ping to the background while stickers or a lock are present. */
 const LOCK_PING_MS = 20_000;
+/** At most this often, the slow tick re-measures whether the page is canvas-drawn. */
+const RENDERING_CHECK_MS = 2_000;
 
 declare global {
   interface Window {
@@ -141,8 +145,48 @@ export async function boot() {
       host.reassert();
       spa.check();
       if (document.body) positioner.observe(document.body);
+      checkRendering(false);
     },
   );
+
+  // ---- canvas-drawn pages ----
+  // Known canvas apps are recognised from the URL at once; anything else is
+  // measured once the page is loaded and idle, then again on the slow tick.
+  let rendering: RenderingMode = knownCanvasApp(location.hostname, location.pathname) ? 'canvas' : 'dom';
+  let renderingMeasured = false;
+  let renderingCheckedAt = 0;
+  /** A `canvas-page` audit entry was asked for during this lock. */
+  let canvasAudited = false;
+  function checkRendering(force: boolean) {
+    if (!renderingMeasured && !force) return;
+    const now = Date.now();
+    if (!force && now - renderingCheckedAt < RENDERING_CHECK_MS) return;
+    renderingCheckedAt = now;
+    renderingMeasured = true;
+    let next: RenderingMode;
+    try {
+      next = pageRenderingMode({ skip: (n) => host.isOurs(n) });
+    } catch {
+      return;
+    }
+    if (next === rendering) return;
+    rendering = next;
+    onRenderingChanged();
+  }
+  function onRenderingChanged() {
+    toolbar.setCanvas(rendering === 'canvas');
+    sendState({ rendering });
+    noteCanvasLocked();
+  }
+  /**
+   * Locked on a canvas page: the auto-cover can find nothing to cover. Ask
+   * the background for one audit entry (origin only) so the user can see why.
+   */
+  function noteCanvasLocked() {
+    if (depth !== 0 || canvasAudited || !lock.locked || rendering !== 'canvas') return;
+    canvasAudited = true;
+    chrome.runtime.sendMessage({ type: 'CANVAS_PAGE' }).catch(() => {});
+  }
 
   const session = new Session({
     host,
@@ -220,6 +264,14 @@ export async function boot() {
     },
   });
   scanner.start(devNoScan);
+  toolbar.setCanvas(rendering === 'canvas');
+  tabState = { ...tabState, rendering };
+  noteCanvasLocked();
+  {
+    const firstMeasure = () => void onIdle(() => checkRendering(true), 1000);
+    if (document.readyState === 'complete') firstMeasure();
+    else window.addEventListener('load', firstMeasure, { once: true });
+  }
   // Field values change without a mutation record.
   window.addEventListener('change', (e) => e.target instanceof Element && scanner?.recheckField(e.target), true);
   /** Scroll the next suggestion into view. */
@@ -244,7 +296,15 @@ export async function boot() {
     // The popup may have switched suggestions on or off for this site.
     scanner?.rescan();
   });
-  spa.onChange(() => session.handleNavigation());
+  spa.onChange(() => {
+    void session.handleNavigation();
+    // Same origin, different app (Drive vs. a Doc): measure again.
+    if (renderingMeasured) checkRendering(true);
+    else if (knownCanvasApp(location.hostname, location.pathname) !== (rendering === 'canvas')) {
+      rendering = rendering === 'canvas' ? 'dom' : 'canvas';
+      onRenderingChanged();
+    }
+  });
   spa.start();
   positioner.start();
   await session.load();
@@ -439,6 +499,8 @@ export async function boot() {
     }
     refreshSuggestions();
     sendState({ locked: lock.locked, lockReason: lock.reason, paused: session.isPaused, strictInputs: masker.strictCount() });
+    if (lock.locked) noteCanvasLocked();
+    else canvasAudited = false;
     positioner.flush();
   }
   const relock = () => applyLock(currentLock());
@@ -522,6 +584,9 @@ export async function boot() {
             pieces,
             lock: { ...lock, signals: { debugger: bgLock.debugger, manual: bgLock.manual, localSession, webdriver: webdriver() } },
             strict: { on: masker.isStrict, count: masker.strictCount() },
+            rendering,
+            maskRetry: session.maskRetryActive,
+            anchors: session.anchorTags(),
             scan: {
               active: scanner?.active() ?? false,
               scanning: scanner?.scanning ?? false,

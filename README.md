@@ -190,6 +190,12 @@ only in content-script memory, in the isolated world, where page scripts cannot 
    confidence flag and the lost state make that visible.
 6. Cross-origin iframes need their own origin enabled. Modal dialogs make the host inert; it renders
    fine, but hover-peek is disabled until the dialog closes.
+7. Canvas apps (Google Docs, Sheets and Slides, Figma, Excalidraw, Miro, Lucid, PDF viewers, WebGL
+   apps) draw their text as pixels, so there is no DOM text to scan, cover by element, or mask. The
+   popup says so and offers **Draw rectangle**, which hides the region from screenshots only. An
+   agent can still read such a document through the app's own APIs or accessibility mode. While
+   locked, the audit log records `canvas-page` (origin only) to explain why nothing was
+   auto-covered. See [docs/LIMITATIONS.md](docs/LIMITATIONS.md#canvas-drawn-pages).
 
 ## Testing
 

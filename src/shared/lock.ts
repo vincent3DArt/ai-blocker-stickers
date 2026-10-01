@@ -41,7 +41,8 @@ export function lockMessage(reason: LockReason | undefined): string {
   return reason === 'manual' ? 'AI session active' : 'Automation detected';
 }
 
-export type AuditAction = 'session-start' | 'session-end' | 'auto-lock' | 'auto-unlock' | 'unlock-refused';
+/** `canvas-page`: locked on a page drawn on a canvas, so the auto-cover could find nothing. */
+export type AuditAction = 'session-start' | 'session-end' | 'auto-lock' | 'auto-unlock' | 'unlock-refused' | 'canvas-page';
 
 /** One audit record. Never holds covered text: an origin and a short reason at most. */
 export interface AuditEntry {
@@ -56,7 +57,7 @@ export const AUDIT_CAP = 200;
 /** Local-storage mirror of the manual session, so it survives a browser restart. */
 export const SESSION_ACTIVE_KEY = 'sessionActive';
 
-const AUDIT_ACTIONS = new Set<AuditAction>(['session-start', 'session-end', 'auto-lock', 'auto-unlock', 'unlock-refused']);
+const AUDIT_ACTIONS = new Set<AuditAction>(['session-start', 'session-end', 'auto-lock', 'auto-unlock', 'unlock-refused', 'canvas-page']);
 
 /** Append, dropping the oldest entries beyond `cap`. Inputs are validated: storage is writable by content scripts. */
 export function appendAudit(list: unknown, entry: AuditEntry, cap = AUDIT_CAP): AuditEntry[] {

@@ -57,6 +57,15 @@ export interface SessionOptions {
   onGhostClick: (sticker: Sticker) => void;
 }
 
+/** `el` holds at least one non-blank text node of the page's own (stops at the first). */
+function hasText(el: Element, isOurs: (n: Node | null) => boolean): boolean {
+  const w = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+  for (let n = w.nextNode(); n; n = w.nextNode()) {
+    if (/\S/.test((n as Text).data) && !isOurs(n)) return true;
+  }
+  return false;
+}
+
 const LOST_AFTER_MS = 30_000;
 const LOST_AFTER_LOAD_MS = 5_000;
 const DETACH_GRACE_MS = 5_000;
@@ -194,15 +203,34 @@ export class Session {
     this.maskUnderRect(rt, el, p.rect);
   }
 
-  /** True while some rect sticker that wants text masked has none applied. */
+  /**
+   * True while some rect sticker that wants text masked has none applied.
+   *
+   * A rect whose resolved container holds no text at all (a `<canvas>`, a
+   * PDF plugin, an image) has nothing to mask and never will until the page
+   * adds text, which arrives as a mutation and re-arms the retry; it does not
+   * count, so the retry timer does not spin on canvas pages.
+   */
   private maskPending(): boolean {
     if (this.paused) return false;
     for (const rt of this.runtimes.values()) {
       const s = rt.sticker;
       if (s.kind !== 'rect' || !s.maskUnderlyingText) continue;
-      if (!this.o.masker.has(s.id)) return true;
+      if (this.o.masker.has(s.id)) continue;
+      if (rt.status === 'resolved' && rt.el?.isConnected && !hasText(rt.el, this.o.isOurs)) continue;
+      return true;
     }
     return false;
+  }
+
+  /** The masking retry timer is running (tests). */
+  get maskRetryActive(): boolean {
+    return this.maskTimer !== 0;
+  }
+
+  /** Tag of each sticker's resolved anchor or container (tests). */
+  anchorTags(): Array<{ id: string; kind: Sticker['kind']; tag?: string }> {
+    return Array.from(this.runtimes.values()).map((rt) => ({ id: rt.sticker.id, kind: rt.sticker.kind, tag: rt.el?.tagName.toLowerCase() }));
   }
 
   /**
@@ -344,7 +372,7 @@ export class Session {
     }));
   }
 
-  state(): Omit<TabState, 'locked' | 'lockReason'> {
+  state(): Omit<TabState, 'locked' | 'lockReason' | 'rendering'> {
     const rts = Array.from(this.runtimes.values());
     return {
       editMode: this.editing,
