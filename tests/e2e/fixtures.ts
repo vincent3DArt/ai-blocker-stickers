@@ -4,6 +4,9 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+/** Origin of the fixtures server (FIXTURES_PORT, default 4173; see playwright.config.ts). */
+export const ORIGIN = 'http://127.0.0.1:' + (process.env.FIXTURES_PORT ?? '4173');
+
 const EXT_PATH = fileURLToPath(new URL('../../.output/chrome-mv3-dev/', import.meta.url));
 
 export interface PieceInfo {

@@ -149,6 +149,50 @@ as "Auto-covered" in the meantime.
 segment with a wildcard, so `/clients/123` becomes `/clients/*`. The popup also offers an exact path
 or the whole site.
 
+## PDFs
+
+Chrome's built-in PDF viewer can't be scripted, so no extension can put a sticker on it. The
+extension ships its own viewer, built on pdf.js, and stickers work there.
+
+**Opening a PDF.** Any of these works:
+
+- On a tab showing a PDF, open the popup and click **Open in sticker PDF viewer**. The popup asks
+  for access to that site, because the viewer has to download the file again.
+- Right-click a link to a `.pdf` and choose **Open PDF link in sticker viewer**.
+- Under **Settings → PDFs**, tick **Always open PDFs in the sticker viewer**. Top-level navigations
+  to an http(s) URL ending in `.pdf` then open in the viewer. This needs access to all sites, and
+  the redirect rule only exists while the option is on.
+- In the viewer, use **Open file…** or drop a PDF onto the page.
+
+For a local `file://` PDF opened by link, turn on **Allow access to file URLs** for the extension in
+`chrome://extensions`. Without it the viewer says so, and **Open file…** still works.
+
+**Stickers in the viewer.** Each page is drawn to a canvas, and pdf.js's text layer sits on top of
+it, so the page has real DOM text. The usual engine runs in the viewer: **Cover element** on a line
+of text masks it and covers its glyphs, **Draw rectangle** covers any region (images, scans,
+signatures), suggestions and the locked-session auto-cover work on the text layer, and peek and the
+AI-session lock behave as on any site. **Remove stickers** clears the document's stickers (refused
+while locked). Stickers belong to one document: they are keyed by the first
+16 hex digits of the file's SHA-256, so they come back when you open the same file again, from any
+URL or from disk, and never appear on a different file.
+
+**Download redacted PDF.** The toolbar button builds a new file, named `<original>-redacted.pdf`.
+By default every page is re-rendered at twice its size, the stickers are painted into the pixels as
+solid black, and the image becomes the whole page. That is a real redaction: the new file has no
+text layer, fonts, links, form fields, metadata or attachments from the original, so nothing under a
+sticker can be copied or extracted. The cost is a larger file and text you can no longer select
+anywhere on the page, as the toolbar note says. The download is assembled in the page and saved
+with a link, so the extension needs no `downloads` permission.
+
+**Keep text outside stickers (vector)** draws black boxes over the original pages instead, without
+flattening. It is *not* a redaction: the text under each box stays in the file and can still be
+selected, copied and extracted. It is off by default and refused while the tab is locked.
+
+**What the viewer stores and sends.** It downloads the PDF you opened and nothing else: pdf.js's
+worker, CMaps, standard fonts and image decoders are packaged with the extension, and none of them
+is fetched from a CDN. Storage gets the document key and the stickers' geometry. The file name,
+the URL and the document's text are never stored.
+
 ## What the AI sees
 
 | Mode | Applies to | What happens |
@@ -185,7 +229,8 @@ only in content-script memory, in the isolated world, where page scripts cannot 
    non-space character, including punctuation, becomes a bullet, so an SSN shows as eleven bullets.
 4. Raw HTML over the network (view-source, a page fetch, debugger response bodies), hidden inputs,
    secrets in the URL or tab title, downloads, Chrome's PDF viewer, and `chrome://` pages are out of
-   any extension's reach.
+   any extension's reach. Open a PDF in the extension's own viewer to sticker it (see [PDFs](#pdfs));
+   the original file is still on the server or the disk, and an agent can fetch that.
 5. Anchoring is heuristic. Virtualised lists that recycle rows can attach to the wrong row. The
    confidence flag and the lost state make that visible.
 6. Cross-origin iframes need their own origin enabled. Modal dialogs make the host inert; it renders
@@ -196,6 +241,15 @@ only in content-script memory, in the isolated world, where page scripts cannot 
    agent can still read such a document through the app's own APIs or accessibility mode. While
    locked, the audit log records `canvas-page` (origin only) to explain why nothing was
    auto-covered. See [docs/LIMITATIONS.md](docs/LIMITATIONS.md#canvas-drawn-pages).
+8. PDF vector mode is not a redaction. **Keep text outside stickers (vector)** only draws boxes on
+   top of the page; the covered text stays in the file and can be copied or extracted. Only the
+   default, flattened download removes it. A flattened page is an image: larger, and not
+   searchable. A sticker that is lost when you download is not redacted; the viewer warns first.
+9. PDFs from `file://` links need **Allow access to file URLs** in `chrome://extensions`, and PDFs
+   from a site need access to that site. **Always open PDFs in the sticker viewer** only catches
+   URLs whose path ends in `.pdf`; a PDF served from another URL, or embedded in a page, still opens
+   in Chrome's viewer. Pages with more than pdf.js's text-span limit, scanned PDFs (no text layer:
+   use Draw rectangle) and rotated text are covered less precisely than plain text.
 
 ## Testing
 
@@ -218,7 +272,15 @@ or `AIBS_HEADED=1` to watch the run.
 
 The fixture server on port 4173 starts automatically through Playwright's `webServer` config. The
 development build alone pre-authorises `http://127.0.0.1:4173`, so the tests never hit a permission
-prompt; production builds request every origin from the user.
+prompt; production builds request every origin from the user. To run a second checkout's suite at
+the same time, set `FIXTURES_PORT` (for example `4180`) for both the development build and
+Playwright.
+
+`tests/e2e/pdf.spec.ts` opens `fixtures/sample.pdf` in the viewer, covers the SSN in its text layer
+and a paragraph with a rectangle, downloads the redacted file and checks with pdf.js in Node that it
+has two pages and no text, then that the region is black in its pixels, that the stickers return
+for the same file and not for `fixtures/other.pdf`. `node scripts/make-fixture-pdf.mjs` regenerates
+both PDFs (deterministically).
 
 Playwright is itself a debugger on every tab and sets `navigator.webdriver`, so the suite would run
 permanently locked. The development build honours a storage flag that turns auto-lock off, and the

@@ -12,11 +12,10 @@
  * Numbers in test names refer to the red-team channel list.
  */
 import type { Page } from '@playwright/test';
-import { test, expect, boxOf, pixelAt, type Ext } from './fixtures';
+import { test, expect, boxOf, pixelAt, ORIGIN, type Ext } from './fixtures';
 
 const SECRETS = ['123-45-6789', '987-65-4321', '111-22-3333', '9876543210', 'Social security number', 'SSN card'];
 const STICKER: [number, number, number] = [0x1f, 0x29, 0x37];
-const ORIGIN = 'http://127.0.0.1:4173';
 
 type Box = { x: number; y: number; w: number; h: number };
 

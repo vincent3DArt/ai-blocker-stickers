@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Sticker PDF viewer</title>
+  </head>
+  <body data-state="empty">
+    <header id="bar">
+      <div class="row">
+        <strong id="title">Sticker PDF viewer</strong>
+        <label class="btn" title="Open a PDF from this computer">
+          Open file…
+          <input id="file" type="file" accept="application/pdf,.pdf" hidden />
+        </label>
+        <span class="sep"></span>
+        <button id="pick" type="button" disabled>Cover element</button>
+        <button id="rect" type="button" disabled>Draw rectangle</button>
+        <button id="done" type="button" disabled>Done</button>
+        <button id="clear" type="button" disabled title="Remove every sticker on this document">Remove stickers</button>
+        <span class="sep"></span>
+        <button id="download" type="button" class="primary" disabled>Download redacted PDF</button>
+        <label class="vector" title="Draws black boxes over the original pages. The text stays in the file and can still be copied or extracted.">
+          <input id="vector" type="checkbox" /> Keep text outside stickers (vector) <em>not a true redaction: text under the boxes stays extractable</em>
+        </label>
+      </div>
+      <p id="note">Redacted PDFs are flattened to images, so text under stickers is gone and the file is larger.</p>
+      <p id="status" role="status"></p>
+    </header>
+    <main id="viewer">
+      <div id="drop" class="drop">
+        <p>Drop a PDF here, or use <strong>Open file…</strong>.</p>
+        <p class="muted">The file stays on this computer. Only the stickers' position and a short fingerprint of the file are stored.</p>
+      </div>
+      <div id="pages"></div>
+    </main>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

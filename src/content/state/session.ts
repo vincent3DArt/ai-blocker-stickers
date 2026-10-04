@@ -22,6 +22,7 @@ import { LOCKED_RESOLVE, resolveFingerprint } from '../anchor/resolve';
 import { anchorRect, projectRect } from '../anchor/rect-anchor';
 import { clientRects, clipChain, clipTo, docToView, isRendered, toViewRect, union, area } from '../anchor/geometry';
 import type { SiteStore } from './store';
+import { pagePath } from './page-path';
 
 interface Runtime {
   sticker: Sticker;
@@ -269,7 +270,7 @@ export class Session {
   /** Apply every sticker that matches the current path. */
   async load() {
     this.loadedAt = Date.now();
-    const active = this.o.store.active(location.pathname, this.o.frameDepth);
+    const active = this.o.store.active(pagePath(), this.o.frameDepth);
     const activeIds = new Set(active.map((s) => s.id));
     for (const id of Array.from(this.runtimes.keys())) if (!activeIds.has(id)) this.drop(id);
     for (const s of active) if (!this.runtimes.has(s.id)) this.track(s);
@@ -368,7 +369,7 @@ export class Session {
       source: rt.sticker.source,
       status: rt.status,
       pathPattern: rt.sticker.scope.pathPattern,
-      currentPath: location.pathname,
+      currentPath: pagePath(),
     }));
   }
 
@@ -403,7 +404,7 @@ export class Session {
     const sticker: ElementSticker = {
       kind: 'element',
       id: opts.id ?? crypto.randomUUID(),
-      scope: { pathPattern: defaultPathPattern(location.pathname) },
+      scope: { pathPattern: defaultPathPattern(pagePath()) },
       frame: this.frameInfo(),
       source,
       padding: 3,
@@ -430,7 +431,7 @@ export class Session {
     const sticker: RectSticker = {
       kind: 'rect',
       id: crypto.randomUUID(),
-      scope: { pathPattern: defaultPathPattern(location.pathname) },
+      scope: { pathPattern: defaultPathPattern(pagePath()) },
       frame: this.frameInfo(),
       source: 'rect',
       padding: 0,
@@ -454,7 +455,7 @@ export class Session {
   /** Frame descriptor for a new sticker: origin plus a generalised path, never the raw URL. */
   private frameInfo(): Sticker['frame'] {
     const depth = this.o.frameDepth;
-    return { depth, urlPattern: depth > 0 ? location.origin + defaultPathPattern(location.pathname) : undefined };
+    return { depth, urlPattern: depth > 0 ? location.origin + defaultPathPattern(pagePath()) : undefined };
   }
 
   /**
@@ -470,7 +471,7 @@ export class Session {
     rt.sticker = updated;
     rt.view.setSticker(updated);
     this.o.store.upsert(updated);
-    if (!matchesPath(pathPattern, location.pathname)) {
+    if (!matchesPath(pathPattern, pagePath())) {
       this.drop(id);
       this.o.positioner.flush();
     }
@@ -558,6 +559,32 @@ export class Session {
       if (u && rt.status === 'resolved') out.push({ sticker: rt.sticker, rect: u, el: rt.el });
     }
     return out;
+  }
+
+  /**
+   * Every applied sticker's full geometry in viewport coordinates, NOT
+   * clipped to the viewport or scroll ancestors (offscreen parts included),
+   * padding included. Used by the PDF viewer's redacted download. `lost`
+   * counts stickers that have no geometry because their anchor is missing.
+   */
+  geometry(): { rects: ViewRect[]; lost: number } {
+    const rects: ViewRect[] = [];
+    let lost = 0;
+    for (const rt of this.runtimes.values()) {
+      if (rt.status !== 'resolved' || !rt.el?.isConnected) {
+        lost++;
+        continue;
+      }
+      const pad = rt.sticker.padding;
+      const grow = (r: ViewRect): ViewRect => ({ x: r.x - pad, y: r.y - pad, w: r.w + pad * 2, h: r.h + pad * 2 });
+      if (rt.sticker.kind === 'element') {
+        rects.push(...clientRects(rt.el).filter((r) => r.w > 0 && r.h > 0).map(grow));
+      } else {
+        rects.push(grow(projectRect(rt.sticker, toViewRect(rt.el.getBoundingClientRect())).rect));
+      }
+      for (const t of rt.ties) if (t.isConnected) rects.push(...clientRects(t).filter((r) => r.w > 0 && r.h > 0).map(grow));
+    }
+    return { rects, lost };
   }
 
   originals(id: string): string {

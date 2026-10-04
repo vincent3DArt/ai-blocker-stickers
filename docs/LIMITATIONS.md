@@ -180,3 +180,43 @@ close them by breaking the page.
     rectangle stickers stay on), and the audit log records one `canvas-page`
     entry per tab and session, with the origin only and never the path, so
     you can see why nothing was covered.
+
+## The PDF viewer
+
+Chrome's own PDF viewer is a plugin no extension can reach. PDFs opened in
+the extension's viewer (`pdf.html`, built on pdf.js) get a canvas per page
+and pdf.js's text layer on top, and the ordinary sticker engine runs there.
+
+21. **The original file is untouched.** Stickers in the viewer hide the
+    document from screenshots and from whatever reads the viewer's DOM. The
+    PDF itself is still on the server or the disk, and anything that can
+    fetch its URL reads all of it. The canvas pixels are readable through
+    `getImageData` like any canvas (see 6), and the viewer's own memory
+    holds the document, so an agent with debugger access to the viewer tab
+    can read it there. Page scripts of other sites cannot: the viewer runs
+    only top-level, never in a frame.
+22. **Vector mode is not a redaction.** "Keep text outside stickers
+    (vector)" draws black rectangles on top of the original page content
+    with pdf-lib. The text, and any image, under a rectangle stays in the
+    file and can be selected, copied and extracted. Only the default
+    download, which flattens each page into an image with the stickers
+    painted into its pixels, removes it. Flattened pages are larger and
+    not searchable. A sticker that is lost at download time has no
+    geometry and is not redacted; the viewer warns before saving.
+23. **Text layer geometry.** A covered span keeps the width of the glyphs
+    pdf.js measured for it, so the bullets do not shrink the sticker. Text
+    pdf.js cannot extract (scans, text drawn as paths, Type3 fonts it
+    cannot map) has no text layer: there is nothing to mask or scan, and
+    only a rectangle covers it. Above pdf.js's span limit per page, later
+    text gets no span.
+24. **Getting a PDF into the viewer.** A site's PDF needs host permission
+    for that site; a `file://` link needs "Allow access to file URLs" in
+    `chrome://extensions` (Open file… and drag and drop always work). The
+    "Always open PDFs in the sticker viewer" redirect needs access to all
+    sites and only matches top-level navigations to URLs whose path ends in
+    `.pdf`; a PDF served from any other URL, embedded in a page or opened
+    from a POST still lands in Chrome's viewer.
+25. **Stored per document.** Stickers are keyed by the first 64 bits of the
+    file's SHA-256, spelled as letters so the scope sanitiser keeps it. The
+    same bytes from another URL get the same stickers; a re-saved copy of
+    the "same" document is a different file and starts empty.
