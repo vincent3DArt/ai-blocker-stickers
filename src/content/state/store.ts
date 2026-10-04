@@ -1,6 +1,6 @@
 import type { SiteRecord, Sticker } from '@/shared/types';
 import { cleanDismissed, loadSite, saveSite, siteKey } from '@/shared/storage';
-import { matchesPath } from '@/shared/url-match';
+import { frameApplies, scopeApplies, type PathHmacs } from '@/shared/url-match';
 
 /**
  * Content-script view of the site's sticker record. Reads and writes
@@ -61,9 +61,15 @@ export class SiteStore {
     return this.record.enabled;
   }
 
-  /** Stickers that apply to this frame and path, session-scoped ones included. */
-  active(pathname: string, frameDepth: number): Sticker[] {
-    const applies = (s: Sticker) => s.frame.depth === frameDepth && matchesPath(s.scope.pathPattern, pathname);
+  /**
+   * Stickers that apply to this frame and path, session-scoped ones included.
+   * `hmacs` are the current location's path HMACs (precomputed by
+   * Session.load), needed by `exact` scopes and document frames; without
+   * them those stickers never apply. Stickers stored without `scope.kind`
+   * are pattern scopes, as before.
+   */
+  active(pathname: string, frameDepth: number, hmacs: PathHmacs = {}): Sticker[] {
+    const applies = (s: Sticker) => frameApplies(s.frame, frameDepth, hmacs) && scopeApplies(s.scope, pathname, hmacs);
     return [...this.record.stickers.filter(applies), ...Array.from(this.ephemeral.values()).filter(applies)];
   }
 

@@ -464,25 +464,44 @@ async function render() {
   finish();
 }
 
-/** Scope choices for a sticker: this exact page, its default pattern, its section, the whole site. */
-function scopeOptions(s: StickerSummary): string[] {
-  // The exact path goes through the same sanitiser as every stored scope, so
-  // an account number in the URL is never offered (or stored) verbatim.
-  const exact = sanitizePathPattern(s.currentPath || '/');
+const EXACT = 'exact';
 
-  const out = [exact];
-  for (const p of [defaultPathPattern(exact), prefixPathPattern(exact), '/**', s.pathPattern]) {
-    if (!out.includes(p)) out.push(p);
-  }
+/**
+ * Scope choices for a sticker: this page only (exact, matched by an HMAC the
+ * content script computes), pages like this (ids generalised), this section,
+ * the whole site. Pattern options are valued `pattern:<glob>`; every glob
+ * goes through the same sanitiser as stored scopes, so no account number or
+ * document id is ever offered (or stored) verbatim.
+ */
+function scopeOptions(s: StickerSummary): { value: string; label: string; title: string }[] {
+  const path = s.currentPath || '/';
+  const like = defaultPathPattern(path);
+  const section = prefixPathPattern(path);
+  const out: { value: string; label: string; title: string }[] = [
+    { value: EXACT, label: 'This page only', title: 'Only this exact page' },
+  ];
+  const add = (pattern: string, label: string) => {
+    const value = 'pattern:' + pattern;
+    if (!out.some((o) => o.value === value)) out.push({ value, label, title: pattern });
+  };
+  add(like, 'Pages like this');
+  add(section, 'This section');
+  add('/**', 'Whole site');
+  if (s.scopeKind !== 'exact') add(sanitizePathPattern(s.pathPattern), s.pathPattern);
   return out;
 }
 
 function scopeSelect(tabId: number, s: StickerSummary, locked: boolean, lockTitle: string): HTMLSelectElement {
-  const sel = h('select', { class: 'scope', title: locked ? lockTitle : `Applies to ${s.pathPattern}`, disabled: locked });
-  for (const value of scopeOptions(s)) sel.append(h('option', { value }, value));
-  sel.value = s.pathPattern;
+  const applies = s.scopeKind === 'exact' ? 'this page only' : s.pathPattern;
+  const sel = h('select', { class: 'scope', title: locked ? lockTitle : `Applies to ${applies}`, disabled: locked });
+  for (const o of scopeOptions(s)) sel.append(h('option', { value: o.value, title: o.title }, o.label));
+  sel.value = s.scopeKind === 'exact' ? EXACT : 'pattern:' + sanitizePathPattern(s.pathPattern);
   sel.onchange = async () => {
-    await chrome.tabs.sendMessage(tabId, { type: 'SET_SCOPE', id: s.id, pathPattern: sel.value }, { frameId: 0 });
+    const msg =
+      sel.value === EXACT
+        ? { type: 'SET_SCOPE', id: s.id, kind: 'exact' }
+        : { type: 'SET_SCOPE', id: s.id, kind: 'pattern', pathPattern: sel.value.slice('pattern:'.length) };
+    await chrome.tabs.sendMessage(tabId, msg, { frameId: 0 });
     render();
   };
   return sel;

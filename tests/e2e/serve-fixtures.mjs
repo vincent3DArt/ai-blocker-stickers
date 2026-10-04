@@ -26,6 +26,8 @@ createServer(async (req, res) => {
     if (pathname.endsWith('/')) pathname += 'index.html';
     // SPA fixture: any /app/* route serves spa.html
     if (pathname.startsWith('/app/')) pathname = '/spa.html';
+    // Drive-like fixture: /drive/file/d/<id>/view (and /preview) serve drive.html
+    if (/^\/drive\/file\/d\/[^/]+\/(view|preview)$/.test(pathname)) pathname = '/drive.html';
     const file = normalize(join(root, pathname));
     if (!file.startsWith(root)) throw new Error('outside root');
     const s = await stat(file);

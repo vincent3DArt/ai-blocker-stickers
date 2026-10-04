@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Fixture: Drive-like document</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 0; padding: 16px; }
+  .field { margin: 8px 0; }
+  .label { display: inline-block; width: 120px; font-weight: 600; }
+</style>
+</head>
+<body>
+<!-- Served for /drive/file/d/<id>/view and /drive/file/d/<id>/preview: one URL per document. -->
+<h1 id="doc-title">Document</h1>
+<div class="field"><span class="label">SSN</span><span id="doc-ssn">123-45-6789</span></div>
+<script>
+  const m = location.pathname.match(/^\/drive\/file\/d\/([^/]+)\//);
+  document.getElementById('doc-title').textContent = 'Document ' + (m ? m[1] : '?');
+</script>
+</body>
+</html>

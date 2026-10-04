@@ -17,7 +17,7 @@ export interface PieceInfo {
 }
 
 export interface TestState {
-  stickers: { id: string; kind: 'element' | 'rect'; status: 'resolving' | 'resolved' | 'lost'; pathPattern: string }[];
+  stickers: { id: string; kind: 'element' | 'rect'; status: 'resolving' | 'resolved' | 'lost'; pathPattern: string; scopeKind?: 'pattern' | 'exact' }[];
   state: { editMode: boolean; paused: boolean; stickerCount: number; lostCount: number; peeking?: boolean; locked?: boolean; lockReason?: string; saveError?: boolean };
   pieces: PieceInfo[];
   lock?: {

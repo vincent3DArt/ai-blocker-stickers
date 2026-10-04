@@ -10,7 +10,9 @@ import type {
   ViewRect,
 } from '@/shared/types';
 import type { StickerSummary } from '@/shared/messages';
-import { defaultPathPattern, matchesPath, sanitizePathPattern } from '@/shared/url-match';
+import { scopeApplies, type PathHmacs } from '@/shared/url-match';
+import { scopeKindOf, type ScopeKind } from '@/shared/types';
+import { defaultScope, frameDescriptor, makeScope, pathHmacs } from './scope';
 import type { OverlayHost } from '../overlay/host';
 import { StickerView } from '../overlay/sticker-view';
 import type { Positioner } from '../overlay/positioner';
@@ -85,6 +87,10 @@ export class Session {
   private peeking = new Set<string>();
   /** AI-session lock: no pause, weaker matches accepted, ties over-masked. */
   private locked = false;
+  /** Path HMACs of `hmacsKey` (origin + path + search), for exact scopes. */
+  private hmacs: PathHmacs = {};
+  private hmacsKey = '';
+  private loadGen = 0;
 
   private disposers: Array<() => void> = [];
 
@@ -237,8 +243,8 @@ export class Session {
    * Keep retrying the rect scan on a plain timer.
    *
    * `coveredTextRanges` can legitimately come up empty right after the
-   * container resolves — the box is not final, fonts have not swapped, the text
-   * has not reflowed yet — and the events that would normally notice
+   * container resolves â€” the box is not final, fonts have not swapped, the text
+   * has not reflowed yet â€” and the events that would normally notice
    * (rAF, the slow tick) never fire in a background tab. A `setInterval` does,
    * so it is the one signal that works everywhere. It stops as soon as every
    * rect sticker holds a mask, or after `MASK_RETRY_WINDOW_MS`; each mutation
@@ -268,8 +274,13 @@ export class Session {
 
   /** Apply every sticker that matches the current path. */
   async load() {
+    const gen = ++this.loadGen;
+    // Exact scopes match by HMAC, which is async: computed once per URL
+    // (cached), before anything is resolved. A newer load supersedes this one.
+    const hmacs = await this.currentHmacs();
+    if (gen !== this.loadGen) return;
     this.loadedAt = Date.now();
-    const active = this.o.store.active(location.pathname, this.o.frameDepth);
+    const active = this.o.store.active(location.pathname, this.o.frameDepth, hmacs);
     const activeIds = new Set(active.map((s) => s.id));
     for (const id of Array.from(this.runtimes.keys())) if (!activeIds.has(id)) this.drop(id);
     for (const s of active) if (!this.runtimes.has(s.id)) this.track(s);
@@ -368,6 +379,7 @@ export class Session {
       source: rt.sticker.source,
       status: rt.status,
       pathPattern: rt.sticker.scope.pathPattern,
+      scopeKind: scopeKindOf(rt.sticker.scope),
       currentPath: location.pathname,
     }));
   }
@@ -397,14 +409,14 @@ export class Session {
     const now = Date.now();
     const premasked = opts.id ? this.o.masker.rootOf(opts.id) : undefined;
     if (premasked?.isConnected) el = premasked;
-    const anchor = await buildFingerprint(el);
+    const [anchor, scope, frame] = await Promise.all([buildFingerprint(el), defaultScope(location), this.frameInfo()]);
     const moved = opts.id ? this.o.masker.rootOf(opts.id) : undefined;
     if (moved?.isConnected && moved !== el) el = moved;
     const sticker: ElementSticker = {
       kind: 'element',
       id: opts.id ?? crypto.randomUUID(),
-      scope: { pathPattern: defaultPathPattern(location.pathname) },
-      frame: this.frameInfo(),
+      scope,
+      frame,
       source,
       padding: 3,
       createdAt: now,
@@ -426,12 +438,12 @@ export class Session {
     const single = this.singleElementUnder(rect);
     if (single) return this.addElementSticker(single, 'rect');
     const now = Date.now();
-    const a = await anchorRect(rect, (e) => this.o.isOurs(e));
+    const [a, scope, frame] = await Promise.all([anchorRect(rect, (e) => this.o.isOurs(e)), defaultScope(location), this.frameInfo()]);
     const sticker: RectSticker = {
       kind: 'rect',
       id: crypto.randomUUID(),
-      scope: { pathPattern: defaultPathPattern(location.pathname) },
-      frame: this.frameInfo(),
+      scope,
+      frame,
       source: 'rect',
       padding: 0,
       createdAt: now,
@@ -452,25 +464,43 @@ export class Session {
   }
 
   /** Frame descriptor for a new sticker: origin plus a generalised path, never the raw URL. */
-  private frameInfo(): Sticker['frame'] {
-    const depth = this.o.frameDepth;
-    return { depth, urlPattern: depth > 0 ? location.origin + defaultPathPattern(location.pathname) : undefined };
+  private frameInfo(): Promise<Sticker['frame']> {
+    return frameDescriptor(this.o.frameDepth, location);
+  }
+
+  /** HMACs of the current location, recomputed only when the URL changed. */
+  private async currentHmacs(): Promise<PathHmacs> {
+    const key = location.origin + location.pathname + location.search;
+    if (key !== this.hmacsKey) {
+      const h = await pathHmacs(location, this.o.frameDepth);
+      // Another navigation may have finished first; only the latest URL is cached.
+      if (key === location.origin + location.pathname + location.search) {
+        this.hmacs = h;
+        this.hmacsKey = key;
+      }
+      return h;
+    }
+    return this.hmacs;
   }
 
   /**
    * Change a sticker's URL scope. Drops the runtime when it no longer applies
-   * here. The pattern goes through the same sanitiser as the default scope, so
-   * the popup's "exact path" option cannot store a record id.
+   * here. `exact`: this page only; the HMAC of the current path is computed
+   * here (the popup has no key). `pattern`: goes through the same sanitiser
+   * as the default scope, so no record or document id can be stored.
    */
-  setScope(id: string, rawPattern: string) {
+  async setScope(id: string, kind: ScopeKind, rawPattern?: string) {
     const rt = this.runtimes.get(id);
-    if (!rt || typeof rawPattern !== 'string') return;
-    const pathPattern = sanitizePathPattern(rawPattern);
-    const updated = { ...rt.sticker, scope: { ...rt.sticker.scope, pathPattern }, updatedAt: Date.now() } as Sticker;
-    rt.sticker = updated;
-    rt.view.setSticker(updated);
+    if (!rt) return;
+    if (kind !== 'exact' && typeof rawPattern !== 'string') return;
+    const scope = await makeScope(kind === 'exact' ? 'exact' : 'pattern', location, rawPattern);
+    const cur = this.runtimes.get(id);
+    if (!cur) return;
+    const updated = { ...cur.sticker, scope, updatedAt: Date.now() } as Sticker;
+    cur.sticker = updated;
+    cur.view.setSticker(updated);
     this.o.store.upsert(updated);
-    if (!matchesPath(pathPattern, location.pathname)) {
+    if (!scopeApplies(scope, location.pathname, await this.currentHmacs())) {
       this.drop(id);
       this.o.positioner.flush();
     }

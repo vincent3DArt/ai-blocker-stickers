@@ -707,8 +707,10 @@ export async function boot() {
         break;
       case 'SET_SCOPE':
         if (lock.locked) return refuse('SET_SCOPE', sendResponse);
-        session.setScope(m.id, m.pathPattern);
-        sendResponse({ ok: true });
+        session.setScope(m.id, m.kind === 'exact' ? 'exact' : 'pattern', m.pathPattern).then(
+          () => sendResponse({ ok: true }),
+          () => sendResponse({ ok: false }),
+        );
         return true;
       case 'COVER_CONTEXT_TARGET':
         if (contextTarget) {

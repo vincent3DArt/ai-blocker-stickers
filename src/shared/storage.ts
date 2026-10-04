@@ -108,7 +108,7 @@ const LEAK_PATTERNS = [/\b\d{3}[- ]\d{2}[- ]\d{4}\b/, /\b\d{2}-\d{7}\b/, /\b\d{9
  * timestamp, a length or a layout coordinate (an epoch in milliseconds is 13
  * digits, and matching it here used to abort every single save).
  */
-const HMAC_KEYS = new Set(['textHmac', 'keyHmac', 'idHmac', 'testIdHmac', 'nameHmac', 'dismissedSuggestions']);
+const HMAC_KEYS = new Set(['textHmac', 'keyHmac', 'idHmac', 'testIdHmac', 'nameHmac', 'dismissedSuggestions', 'pathHmac', 'urlHmac']);
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
@@ -132,7 +132,8 @@ export function assertNoCoveredText(rec: SiteRecord): void {
     }
     if (value && typeof value === 'object') {
       for (const [k, v] of Object.entries(value)) {
-        if (HMAC_KEYS.has(k)) continue;
+        // Only a real HMAC (64 hex) is exempt; anything else under an HMAC key is scanned.
+        if (HMAC_KEYS.has(k) && !(typeof v === 'string' && !/^[0-9a-f]{64}$/.test(v))) continue;
         visit(v, path ? `${path}.${k}` : k);
       }
     }

@@ -145,9 +145,11 @@ only. When you end the session, the popup asks "Keep N auto-covered stickers?". 
 stores them like any other sticker; Cancel removes them once the lock is off. The popup lists them
 as "Auto-covered" in the meantime.
 
-**Scope.** Each sticker is scoped to a URL path pattern. The default replaces an ID-like last
-segment with a wildcard, so `/clients/123` becomes `/clients/*`. The popup also offers an exact path
-or the whole site.
+**Scope.** Each sticker is scoped to a URL path pattern or to one exact page. Record ids are
+generalised by default, so `/clients/123` becomes `/clients/*`. A path that names a document (a
+Google Drive/Docs id, a UUID, long hex) or a known document host (Drive, Docs, SharePoint, Dropbox,
+Box, Notion, HubSpot) defaults to "This page only", stored as an HMAC of the path, never the path
+itself. The popup offers This page only, Pages like this, This section and Whole site.
 
 ## What the AI sees
 

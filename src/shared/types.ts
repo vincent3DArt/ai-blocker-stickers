@@ -108,16 +108,44 @@ export type MaskMode = 'text' | 'input' | 'visual-only';
  */
 export type StickerSource = 'manual' | 'selection' | 'context-menu' | 'rect' | 'suggest' | 'session-auto';
 
+/**
+ * `pattern`: `pathPattern` is matched as a glob (record ids generalised).
+ * `exact`: this page only, matched by `pathHmac`; `pathPattern` is then only
+ * the sanitised display form and is never used for matching.
+ */
+export type ScopeKind = 'pattern' | 'exact';
+
 export interface StickerScope {
-  /** Segment glob: `*` matches one segment, `**` matches the rest. */
+  /** Absent on stickers stored before exact scopes existed: treated as `pattern`. */
+  kind?: ScopeKind;
+  /**
+   * Segment glob: `*` matches one segment, `**` matches the rest. Always
+   * sanitised (no record or document id), for `exact` scopes too.
+   */
   pathPattern: string;
+  /**
+   * `exact` only: HMAC (per-install key) of the normalised pathname, plus
+   * the search string when `includeQuery`. Never the raw path.
+   */
+  pathHmac?: string;
+  includeQuery?: boolean;
 }
 
 export interface StickerFrame {
   /** 0 = top frame. */
   depth: number;
-  /** Glob over the frame URL, only set for depth > 0. */
+  /** Glob over the frame URL (origin + sanitised path), only set for depth > 0. */
   urlPattern?: string;
+  /**
+   * HMAC of the frame's origin + normalised path, set instead of `urlPattern`
+   * when the frame URL names a document (a Drive preview): the sticker then
+   * applies in that one frame document only.
+   */
+  urlHmac?: string;
+}
+
+export function scopeKindOf(scope: StickerScope): ScopeKind {
+  return scope.kind === 'exact' ? 'exact' : 'pattern';
 }
 
 export interface StickerBase {

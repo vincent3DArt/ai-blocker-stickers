@@ -25,6 +25,16 @@ export async function attrHmacOf(value: string | null | undefined): Promise<stri
   return hmacHex(hmacKey, 'attr\u0000' + value);
 }
 
+/**
+ * HMAC of a URL path (already normalised by the caller), for exact sticker
+ * scopes and frame descriptors. Domain-separated from text and attribute
+ * HMACs. `kind` separates page paths from frame URLs.
+ */
+export async function pathHmacOf(value: string, kind: 'path' | 'frame' = 'path'): Promise<string | undefined> {
+  if (!hmacKey) return undefined;
+  return hmacHex(hmacKey, kind + '\u0000' + value);
+}
+
 /** An attribute stored raw when identifier-like, as an HMAC otherwise. */
 async function rawOrHmac(value: string | null | undefined): Promise<{ raw?: string; hmac?: string }> {
   if (!value) return {};

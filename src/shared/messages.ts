@@ -1,5 +1,5 @@
 import type { LockReason } from './lock';
-import type { Sticker, TabState } from './types';
+import type { ScopeKind, Sticker, TabState } from './types';
 
 /** Content script -> background. */
 export type ContentToBackground =
@@ -47,7 +47,8 @@ export type ToContent =
   | { type: 'GET_STICKERS' }
   | { type: 'LOCATE_STICKER'; id: string }
   | { type: 'DELETE_STICKER'; id: string }
-  | { type: 'SET_SCOPE'; id: string; pathPattern: string }
+  /** `exact`: this page only (the content script computes the path HMAC). `pattern` (default): `pathPattern`, sanitised. */
+  | { type: 'SET_SCOPE'; id: string; kind?: ScopeKind; pathPattern?: string }
   | { type: 'COVER_CONTEXT_TARGET' }
   | { type: 'START_RECT' }
   | { type: 'START_PICK' }
@@ -95,7 +96,9 @@ export interface StickerSummary {
   label?: string;
   source?: Sticker['source'];
   status: 'resolving' | 'resolved' | 'lost';
+  /** Sanitised pattern; for `exact` scopes only the display form. */
   pathPattern: string;
+  scopeKind: ScopeKind;
   /** `location.pathname` of the page the sticker lives on. */
   currentPath: string;
 }
