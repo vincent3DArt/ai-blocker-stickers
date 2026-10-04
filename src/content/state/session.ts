@@ -24,6 +24,7 @@ import { LOCKED_RESOLVE, resolveFingerprint } from '../anchor/resolve';
 import { anchorRect, projectRect } from '../anchor/rect-anchor';
 import { clientRects, clipChain, clipTo, docToView, isRendered, toViewRect, union, area } from '../anchor/geometry';
 import type { SiteStore } from './store';
+import { pageLoc, pagePath } from './page-path';
 
 interface Runtime {
   sticker: Sticker;
@@ -280,7 +281,7 @@ export class Session {
     const hmacs = await this.currentHmacs();
     if (gen !== this.loadGen) return;
     this.loadedAt = Date.now();
-    const active = this.o.store.active(location.pathname, this.o.frameDepth, hmacs);
+    const active = this.o.store.active(pagePath(), this.o.frameDepth, hmacs);
     const activeIds = new Set(active.map((s) => s.id));
     for (const id of Array.from(this.runtimes.keys())) if (!activeIds.has(id)) this.drop(id);
     for (const s of active) if (!this.runtimes.has(s.id)) this.track(s);
@@ -380,7 +381,7 @@ export class Session {
       status: rt.status,
       pathPattern: rt.sticker.scope.pathPattern,
       scopeKind: scopeKindOf(rt.sticker.scope),
-      currentPath: location.pathname,
+      currentPath: pagePath(),
     }));
   }
 
@@ -409,7 +410,7 @@ export class Session {
     const now = Date.now();
     const premasked = opts.id ? this.o.masker.rootOf(opts.id) : undefined;
     if (premasked?.isConnected) el = premasked;
-    const [anchor, scope, frame] = await Promise.all([buildFingerprint(el), defaultScope(location), this.frameInfo()]);
+    const [anchor, scope, frame] = await Promise.all([buildFingerprint(el), defaultScope(pageLoc()), this.frameInfo()]);
     const moved = opts.id ? this.o.masker.rootOf(opts.id) : undefined;
     if (moved?.isConnected && moved !== el) el = moved;
     const sticker: ElementSticker = {
@@ -438,7 +439,7 @@ export class Session {
     const single = this.singleElementUnder(rect);
     if (single) return this.addElementSticker(single, 'rect');
     const now = Date.now();
-    const [a, scope, frame] = await Promise.all([anchorRect(rect, (e) => this.o.isOurs(e)), defaultScope(location), this.frameInfo()]);
+    const [a, scope, frame] = await Promise.all([anchorRect(rect, (e) => this.o.isOurs(e)), defaultScope(pageLoc()), this.frameInfo()]);
     const sticker: RectSticker = {
       kind: 'rect',
       id: crypto.randomUUID(),
@@ -465,16 +466,20 @@ export class Session {
 
   /** Frame descriptor for a new sticker: origin plus a generalised path, never the raw URL. */
   private frameInfo(): Promise<Sticker['frame']> {
-    return frameDescriptor(this.o.frameDepth, location);
+    return frameDescriptor(this.o.frameDepth, pageLoc());
   }
 
   /** HMACs of the current location, recomputed only when the URL changed. */
   private async currentHmacs(): Promise<PathHmacs> {
-    const key = location.origin + location.pathname + location.search;
+    const locKey = () => {
+      const l = pageLoc();
+      return l.origin + l.pathname + l.search;
+    };
+    const key = locKey();
     if (key !== this.hmacsKey) {
-      const h = await pathHmacs(location, this.o.frameDepth);
+      const h = await pathHmacs(pageLoc(), this.o.frameDepth);
       // Another navigation may have finished first; only the latest URL is cached.
-      if (key === location.origin + location.pathname + location.search) {
+      if (key === locKey()) {
         this.hmacs = h;
         this.hmacsKey = key;
       }
@@ -493,14 +498,14 @@ export class Session {
     const rt = this.runtimes.get(id);
     if (!rt) return;
     if (kind !== 'exact' && typeof rawPattern !== 'string') return;
-    const scope = await makeScope(kind === 'exact' ? 'exact' : 'pattern', location, rawPattern);
+    const scope = await makeScope(kind === 'exact' ? 'exact' : 'pattern', pageLoc(), rawPattern);
     const cur = this.runtimes.get(id);
     if (!cur) return;
     const updated = { ...cur.sticker, scope, updatedAt: Date.now() } as Sticker;
     cur.sticker = updated;
     cur.view.setSticker(updated);
     this.o.store.upsert(updated);
-    if (!scopeApplies(scope, location.pathname, await this.currentHmacs())) {
+    if (!scopeApplies(scope, pagePath(), await this.currentHmacs())) {
       this.drop(id);
       this.o.positioner.flush();
     }
@@ -588,6 +593,32 @@ export class Session {
       if (u && rt.status === 'resolved') out.push({ sticker: rt.sticker, rect: u, el: rt.el });
     }
     return out;
+  }
+
+  /**
+   * Every applied sticker's full geometry in viewport coordinates, NOT
+   * clipped to the viewport or scroll ancestors (offscreen parts included),
+   * padding included. Used by the PDF viewer's redacted download. `lost`
+   * counts stickers that have no geometry because their anchor is missing.
+   */
+  geometry(): { rects: ViewRect[]; lost: number } {
+    const rects: ViewRect[] = [];
+    let lost = 0;
+    for (const rt of this.runtimes.values()) {
+      if (rt.status !== 'resolved' || !rt.el?.isConnected) {
+        lost++;
+        continue;
+      }
+      const pad = rt.sticker.padding;
+      const grow = (r: ViewRect): ViewRect => ({ x: r.x - pad, y: r.y - pad, w: r.w + pad * 2, h: r.h + pad * 2 });
+      if (rt.sticker.kind === 'element') {
+        rects.push(...clientRects(rt.el).filter((r) => r.w > 0 && r.h > 0).map(grow));
+      } else {
+        rects.push(grow(projectRect(rt.sticker, toViewRect(rt.el.getBoundingClientRect())).rect));
+      }
+      for (const t of rt.ties) if (t.isConnected) rects.push(...clientRects(t).filter((r) => r.w > 0 && r.h > 0).map(grow));
+    }
+    return { rects, lost };
   }
 
   originals(id: string): string {

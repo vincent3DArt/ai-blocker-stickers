@@ -21,6 +21,8 @@ import { Scanner } from './detect/scanner';
 import { knownCanvasApp, pageRenderingMode, type RenderingMode } from './detect/canvas-detect';
 import { onIdle } from './detect/scheduler';
 import { SuggestView } from './overlay/suggest-view';
+import { setPagePathOverride } from './state/page-path';
+import type { ViewRect } from '@/shared/types';
 
 /*
  * Development-only switches live inside `if (import.meta.env.DEV)` blocks
@@ -74,10 +76,44 @@ async function emulateHiddenTab() {
   console.debug('[aibs] emulating a hidden tab (dev only)');
 }
 
-export async function boot() {
-  if (window.__aibsBooted) return;
+/** Options for running the engine inside one of the extension's own pages (the PDF viewer). */
+export interface BootOptions {
+  /** Pathname substitute that sticker scopes are matched against (see state/page-path). */
+  pagePath?: () => string;
+  /** The page is DOM text by construction: skip canvas-page detection. */
+  forceDom?: boolean;
+}
+
+/** Handle returned to an extension page that boots the engine itself. */
+export interface BootApi {
+  setEditing(on: boolean): void;
+  startPick(): void;
+  startRect(): void;
+  /** Unclipped viewport rects of every applied sticker, and how many are lost. */
+  geometry(): { rects: ViewRect[]; lost: number };
+  /** Re-run sticker resolution and scanning after the page replaced its content. */
+  refresh(): void;
+  /** Remove every sticker that applies here (the PDF viewer's current document). Refused while locked. */
+  removeAll(): { ok: boolean; removed: number };
+  readonly stickerCount: number;
+  readonly locked: boolean;
+}
+
+/** Message types an extension page answers. Anything else (popup traffic to the background) is left alone. */
+const TO_CONTENT_TYPES = new Set([
+  'COMMAND', 'SET_EDIT_MODE', 'SET_PAUSED', 'SET_LOCK', 'GET_STICKERS', 'LOCATE_STICKER', 'DELETE_STICKER', 'SET_SCOPE',
+  'COVER_CONTEXT_TARGET', 'START_RECT', 'START_PICK', 'SESSION_ENDED', 'GET_SUGGESTIONS', 'COVER_SUGGESTIONS',
+  'REVIEW_SUGGESTIONS', 'DISMISS_SUGGESTION',
+]);
+
+export async function boot(opts: BootOptions = {}): Promise<BootApi | undefined> {
+  if (window.__aibsBooted) return undefined;
   window.__aibsBooted = true;
-  if (!location.origin || location.origin === 'null') return;
+  if (!location.origin || location.origin === 'null') return undefined;
+  setPagePathOverride(opts.pagePath ?? null);
+  // In an extension page, runtime messages between the popup and the
+  // background reach this listener too; answering them would hijack the reply.
+  const extensionPage = location.protocol === 'chrome-extension:';
   if (import.meta.env.DEV) await emulateHiddenTab();
 
   // Register the message listener before any await so messages that arrive
@@ -87,6 +123,7 @@ export async function boot() {
   let handleMessage: ((m: ToContent, sendResponse: (r?: unknown) => void) => boolean | void) | null = null;
   chrome.runtime.onMessage.addListener((msg: unknown, sender, sendResponse) => {
     if (!isToContent(msg) || sender.id !== chrome.runtime.id) return;
+    if (extensionPage && !TO_CONTENT_TYPES.has(msg.type) && !(import.meta.env.DEV && msg.type.startsWith('TEST_'))) return;
     ready.then(() => {
       const handledAsync = handleMessage?.(msg, sendResponse);
       if (handledAsync !== true) sendResponse(undefined);
@@ -152,12 +189,13 @@ export async function boot() {
   // ---- canvas-drawn pages ----
   // Known canvas apps are recognised from the URL at once; anything else is
   // measured once the page is loaded and idle, then again on the slow tick.
-  let rendering: RenderingMode = knownCanvasApp(location.hostname, location.pathname) ? 'canvas' : 'dom';
+  let rendering: RenderingMode = !opts.forceDom && knownCanvasApp(location.hostname, location.pathname) ? 'canvas' : 'dom';
   let renderingMeasured = false;
   let renderingCheckedAt = 0;
   /** A `canvas-page` audit entry was asked for during this lock. */
   let canvasAudited = false;
   function checkRendering(force: boolean) {
+    if (opts.forceDom) return;
     if (!renderingMeasured && !force) return;
     const now = Date.now();
     if (!force && now - renderingCheckedAt < RENDERING_CHECK_MS) return;
@@ -299,6 +337,7 @@ export async function boot() {
   spa.onChange(() => {
     void session.handleNavigation();
     // Same origin, different app (Drive vs. a Doc): measure again.
+    if (opts.forceDom) return;
     if (renderingMeasured) checkRendering(true);
     else if (knownCanvasApp(location.hostname, location.pathname) !== (rendering === 'canvas')) {
       rendering = rendering === 'canvas' ? 'dom' : 'canvas';
@@ -754,4 +793,33 @@ export async function boot() {
   markReady();
   sendState(session.state());
   console.debug('[aibs] ready', { depth, stickers: session.summaries().length });
+  return {
+    setEditing,
+    startPick: () => startPick(),
+    startRect,
+    geometry: () => {
+      positioner.flush();
+      return session.geometry();
+    },
+    refresh: () => {
+      void session.handleNavigation();
+      scanner?.rescan();
+    },
+    removeAll: () => {
+      if (lock.locked) {
+        refuse('remove-all');
+        return { ok: false, removed: 0 };
+      }
+      const ids = session.summaries().map((x) => x.id);
+      ids.forEach((id) => session.remove(id));
+      positioner.flush();
+      return { ok: true, removed: ids.length };
+    },
+    get stickerCount() {
+      return session.summaries().length;
+    },
+    get locked() {
+      return lock.locked;
+    },
+  };
 }

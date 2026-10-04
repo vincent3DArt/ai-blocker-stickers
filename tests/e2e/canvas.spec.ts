@@ -4,7 +4,7 @@
  * work on; a rectangle sticker's pixel overlay is what still protects.
  */
 import type { Page } from '@playwright/test';
-import { test, expect, pixelAt, type Ext, type TestState } from './fixtures';
+import { test, expect, pixelAt, ORIGIN, type Ext, type TestState } from './fixtures';
 
 const STICKER: [number, number, number] = [0x1f, 0x29, 0x37];
 const near = (a: [number, number, number], b: [number, number, number], tol = 24) => a.every((v, i) => Math.abs(v - b[i]) <= tol);
@@ -126,10 +126,10 @@ test.describe('canvas pages', () => {
   test('popup: canvas note, Cover element and the site switch disabled, Draw rectangle primary', async ({ page, ext }) => {
     await page.goto('/canvas.html');
     await waitCanvas(ext, page);
-    const tab = await ext.worker.evaluate(async () => {
-      const tabs = await chrome.tabs.query({ url: 'http://127.0.0.1:4173/canvas.html' });
+    const tab = await ext.worker.evaluate(async (origin) => {
+      const tabs = await chrome.tabs.query({ url: origin + '/canvas.html' });
       return { id: tabs[0].id, url: tabs[0].url };
-    });
+    }, ORIGIN);
     const id = new URL(ext.worker.url()).host;
     const popup = await ext.context.newPage();
     // The popup asks for the active tab, which here would be the popup itself.
@@ -160,14 +160,14 @@ test.describe('canvas pages', () => {
       ext.worker.evaluate(async () => ((await chrome.storage.local.get('audit')).audit ?? []) as { action: string; origin?: string; reason?: string }[]);
     await expect.poll(async () => (await entries()).filter((e) => e.action === 'canvas-page').length).toBe(1);
     const e = (await entries()).find((x) => x.action === 'canvas-page')!;
-    expect(e.origin).toBe('http://127.0.0.1:4173');
+    expect(e.origin).toBe(ORIGIN);
     expect(JSON.stringify(e)).not.toContain('canvas.html');
     expect(JSON.stringify(e)).not.toContain('abc');
     // The lock badge still applies.
-    const badge = await ext.worker.evaluate(async () => {
-      const [t] = await chrome.tabs.query({ url: 'http://127.0.0.1:4173/canvas.html*' });
+    const badge = await ext.worker.evaluate(async (origin) => {
+      const [t] = await chrome.tabs.query({ url: origin + '/canvas.html*' });
       return chrome.action.getBadgeText({ tabId: t.id });
-    });
+    }, ORIGIN);
     expect(badge).toBe('\u{1F512}');
     // A reload in the same session does not log again.
     await page.reload();

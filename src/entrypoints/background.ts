@@ -21,6 +21,8 @@ const KEEP_ALL_SITES_KEY = 'keepAllSites';
  * blocks, as literals, so production builds drop them entirely
  * (scripts/check-prod-bundle.mjs).
  */
+/** Fixture server port of a development build (wxt.config.ts); read inside DEV blocks only. */
+declare const __AIBS_FIXTURES_PORT__: string;
 const POLL_MS = 2_000;
 const POLL_ALARM = 'aibs-lock-poll';
 
@@ -92,7 +94,7 @@ async function reconcile(): Promise<void> {
     wanted.add(scriptId(origin));
   }
   if (import.meta.env.DEV) {
-    for (const o of ['http://127.0.0.1:4173', 'http://localhost:4173']) {
+    for (const o of [`http://127.0.0.1:${__AIBS_FIXTURES_PORT__}`, `http://localhost:${__AIBS_FIXTURES_PORT__}`]) {
       if (await hasOriginPermission(o)) {
         await registerOrigin(o);
         wanted.add(scriptId(o));
@@ -352,16 +354,76 @@ async function tabLocked(tabId: number | undefined): Promise<boolean> {
   return tabId !== undefined && (await getTabState(tabId)).locked === true;
 }
 
+// ---- PDF viewer ----
+/** storage.local: the user turned on "Always open PDFs in the sticker viewer". */
+const PDF_REDIRECT_KEY = 'pdfRedirect';
+const PDF_RULE_ID = 1;
+const PDF_MENU_ID = 'aibs-pdf-link';
+
+function viewerUrl(src: string): string {
+  return chrome.runtime.getURL('pdf.html') + '?src=' + encodeURIComponent(src);
+}
+
+/**
+ * Add or remove the dynamic redirect rule: top-level navigations to an
+ * http(s) URL whose path ends in .pdf open in the viewer instead. A redirect
+ * needs host access to the request, so the rule only exists while the
+ * option is on AND the all-sites permission is granted.
+ */
+async function reconcilePdfRedirect(): Promise<boolean> {
+  const want = (await chrome.storage.local.get(PDF_REDIRECT_KEY))[PDF_REDIRECT_KEY] === true && (await hasAllSites());
+  const rules = await chrome.declarativeNetRequest.getDynamicRules();
+  const has = rules.some((r) => r.id === PDF_RULE_ID);
+  if (want && !has) {
+    await chrome.declarativeNetRequest.updateDynamicRules({
+      removeRuleIds: [PDF_RULE_ID],
+      addRules: [
+        {
+          id: PDF_RULE_ID,
+          priority: 1,
+          action: {
+            type: 'redirect' as chrome.declarativeNetRequest.RuleActionType,
+            // \0 is the whole matched URL, unencoded: the viewer takes
+            // everything after `?src=` in that case.
+            redirect: { regexSubstitution: chrome.runtime.getURL('pdf.html') + '?src=\\0' },
+          },
+          condition: {
+            regexFilter: '^https?://[^?#]*\\.[pP][dD][fF](\\?[^#]*)?$',
+            resourceTypes: ['main_frame' as chrome.declarativeNetRequest.ResourceType],
+          },
+        },
+      ],
+    });
+  } else if (!want && has) {
+    await chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds: [PDF_RULE_ID] });
+  }
+  return want;
+}
+
+function createMenus() {
+  chrome.contextMenus.create({
+    id: 'aibs-cover',
+    title: 'Cover this element with a sticker',
+    contexts: ['all'],
+  });
+  chrome.contextMenus.create({
+    id: PDF_MENU_ID,
+    title: 'Open PDF link in sticker viewer',
+    contexts: ['link'],
+    targetUrlPatterns: ['*://*/*.pdf', '*://*/*.pdf?*', '*://*/*.PDF', '*://*/*.PDF?*', 'file:///*.pdf', 'file:///*.PDF'],
+  });
+}
+
 export default defineBackground(() => {
   chrome.runtime.onInstalled.addListener(async () => {
-    chrome.contextMenus.create({
-      id: 'aibs-cover',
-      title: 'Cover this element with a sticker',
-      contexts: ['all'],
-    });
+    createMenus();
     await reconcile();
+    await reconcilePdfRedirect().catch(() => {});
   });
-  chrome.runtime.onStartup.addListener(() => reconcile());
+  chrome.runtime.onStartup.addListener(() => {
+    void reconcile();
+    void reconcilePdfRedirect().catch(() => {});
+  });
 
   // Every service-worker start: resume polling if a sticker tab or a lock survived.
   void ensurePolling();
@@ -377,6 +439,7 @@ export default defineBackground(() => {
     for (const pattern of perm.origins ?? []) {
       if (pattern === ALL_SITES) {
         await unregisterId(ALL_SITES_ID);
+        await reconcilePdfRedirect().catch(() => {});
         continue;
       }
       const origin = parseOrigin(pattern.replace(/\/\*$/, ''));
@@ -503,6 +566,26 @@ export default defineBackground(() => {
         })();
         return true;
       }
+      case 'SET_PDF_REDIRECT':
+      case 'GET_PDF_REDIRECT': {
+        // Popup only. Turning it on needs the all-sites permission, which the
+        // popup requests in the click's user gesture before sending this.
+        if (!fromExtensionPage(sender)) {
+          sendResponse({ ok: false, error: 'sender not allowed' });
+          return undefined;
+        }
+        (async () => {
+          try {
+            if (msg.type === 'SET_PDF_REDIRECT') await chrome.storage.local.set({ [PDF_REDIRECT_KEY]: msg.on === true });
+            const active = await reconcilePdfRedirect();
+            const on = (await chrome.storage.local.get(PDF_REDIRECT_KEY))[PDF_REDIRECT_KEY] === true;
+            sendResponse({ ok: true, on, active });
+          } catch (e) {
+            sendResponse({ ok: false, error: e instanceof Error ? e.message : String(e) });
+          }
+        })();
+        return true;
+      }
       case 'GET_TAB_STATE': {
         if (!fromExtensionPage(sender) || typeof msg.tabId !== 'number') {
           sendResponse(undefined);
@@ -531,6 +614,12 @@ export default defineBackground(() => {
   });
 
   chrome.contextMenus.onClicked.addListener((info, tab) => {
+    if (info.menuItemId === PDF_MENU_ID) {
+      if (info.linkUrl && /^(https?|file):/i.test(info.linkUrl)) {
+        void chrome.tabs.create({ url: viewerUrl(info.linkUrl), index: tab ? tab.index + 1 : undefined });
+      }
+      return;
+    }
     if (info.menuItemId !== 'aibs-cover' || tab?.id === undefined) return;
     chrome.tabs.sendMessage(tab.id, { type: 'COVER_CONTEXT_TARGET' }, { frameId: info.frameId ?? 0 }).catch(() => {});
   });

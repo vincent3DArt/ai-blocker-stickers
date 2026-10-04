@@ -5,7 +5,7 @@
  * see no suggestion chips and no auto-covers; every test here turns it back on.
  */
 import type { Page } from '@playwright/test';
-import { test, expect, type Ext, type TestState } from './fixtures';
+import { test, expect, ORIGIN, type Ext, type TestState } from './fixtures';
 
 const BULLETS = '•'.repeat(11);
 const SPA_SSN = '987-65-4321';
@@ -44,12 +44,12 @@ async function testSession(ctl: Page, active: boolean, keepAuto?: boolean) {
 }
 
 async function siteRecord(ext: Ext) {
-  return ext.worker.evaluate(async () => {
-    const k = 'site:http://127.0.0.1:4173';
+  return ext.worker.evaluate(async (origin) => {
+    const k = 'site:' + origin;
     return (await chrome.storage.local.get(k))[k] as
       | { stickers: { id: string; source: string }[]; dismissedSuggestions?: string[] }
       | undefined;
-  });
+  }, ORIGIN);
 }
 
 test.describe('auto-suggest', () => {

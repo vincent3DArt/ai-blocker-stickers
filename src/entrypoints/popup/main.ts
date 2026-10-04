@@ -217,7 +217,7 @@ function settingsSection(settings: Settings, locked: boolean): HTMLElement {
     });
     scan.append(h('label', {}, radio, ` ${c.label}`, h('span', { class: 'explain' }, c.explain)));
   }
-  return h('details', { class: 'settings' }, h('summary', {}, 'Settings'), box, scan);
+  return h('details', { class: 'settings' }, h('summary', {}, 'Settings'), box, scan, pdfSettingsFieldset());
 }
 
 const SENSITIVITY_CHOICES: Array<{ value: ScanSensitivity; label: string; explain: string }> = [
@@ -309,7 +309,7 @@ async function render() {
   const session = await getSession();
   const audit = await auditSection();
   const settings = await loadSettings();
-  app.replaceChildren(h('h1', {}, 'AI Blocker Stickers'));
+  app.replaceChildren(h('h1', {}, 'AI Blocker Stickers'), pdfOpenSection(tab));
   let tabLocked = false;
   let autoCount = 0;
   const finish = () => app.append(sessionSection(session, autoCount), settingsSection(settings, tabLocked || session?.active === true), audit);
@@ -528,5 +528,97 @@ function stickerRow(tabId: number, s: StickerSummary, locked: boolean, lockTitle
   );
   return h('li', {}, dot, name, scope, locate, del);
 }
+
+// ==== PDF viewer (begin) ====
+// "Open in sticker PDF viewer" for a PDF tab, and the "Always open PDFs in
+// the sticker viewer" setting. Self-contained: render() only places these.
+
+function tabLooksLikePdf(url: string | undefined): boolean {
+  try {
+    const u = new URL(url ?? '');
+    return /^(https?|file):$/.test(u.protocol) && /\.pdf$/i.test(u.pathname);
+  } catch {
+    return false;
+  }
+}
+
+/** Asks the tab for `document.contentType` when it can be scripted (PDFs whose URL has no .pdf). */
+async function tabContentIsPdf(tabId: number): Promise<boolean> {
+  try {
+    const [r] = await chrome.scripting.executeScript({ target: { tabId }, func: () => document.contentType });
+    return r?.result === 'application/pdf';
+  } catch {
+    return false;
+  }
+}
+
+function pdfOpenSection(tab: chrome.tabs.Tab | undefined): HTMLElement {
+  const box = h('section', { class: 'pdf-open' });
+  const url = tab?.url;
+  if (!tab?.id || !url || !/^(https?|file):/i.test(url)) return box;
+  const tabId = tab.id;
+  const show = () =>
+    box.replaceChildren(
+      h('div', { class: 'row' },
+        h('button', {
+          id: 'open-pdf-viewer',
+          class: 'primary',
+          onclick: async () => {
+            // Permission prompt first, inside the click's user gesture: the
+            // viewer fetches the PDF and needs access to its origin.
+            const u = new URL(url);
+            if (u.protocol !== 'file:') {
+              try {
+                await chrome.permissions.request({ origins: [`${u.origin}/*`] });
+              } catch {
+                /* declined: the viewer explains and offers the prompt again */
+              }
+            }
+            await chrome.tabs.create({ url: chrome.runtime.getURL('pdf.html') + '?src=' + encodeURIComponent(url), index: tab.index + 1 });
+            window.close();
+          },
+        }, 'Open in sticker PDF viewer'),
+      ),
+      h('p', { class: 'hint' }, "Chrome's PDF viewer can't take stickers. The sticker viewer can, and downloads a redacted copy."),
+    );
+  if (tabLooksLikePdf(url)) show();
+  else void tabContentIsPdf(tabId).then((pdf) => pdf && show());
+  return box;
+}
+
+function pdfSettingsFieldset(): HTMLElement {
+  const box = h('fieldset', {});
+  const check = h('input', {
+    type: 'checkbox',
+    id: 'pdf-redirect',
+    onchange: async () => {
+      const on = check.checked;
+      if (on) {
+        // A redirect rule needs host access to every page it redirects.
+        let granted = false;
+        try {
+          granted = await chrome.permissions.request({ origins: ['*://*/*'] });
+        } catch {
+          granted = false;
+        }
+        if (!granted) {
+          check.checked = false;
+          return;
+        }
+      }
+      await chrome.runtime.sendMessage({ type: 'SET_PDF_REDIRECT', on }).catch(() => undefined);
+    },
+  });
+  void (chrome.runtime.sendMessage({ type: 'GET_PDF_REDIRECT' }) as Promise<{ on?: boolean; active?: boolean } | undefined>)
+    .then((r) => (check.checked = r?.active === true))
+    .catch(() => {});
+  box.append(
+    h('legend', { class: 'muted' }, 'PDFs'),
+    h('label', {}, check, ' Always open PDFs in the sticker viewer',
+      h('span', { class: 'explain' }, 'Links ending in .pdf open in the extension\'s viewer instead of Chrome\'s. Needs access to all sites. Local files also need "Allow access to file URLs" in chrome://extensions.')),
+  );
+  return box;
+}
+// ==== PDF viewer (end) ====
 
 render();

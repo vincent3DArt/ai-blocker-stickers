@@ -1,0 +1,379 @@
+import './pdf.css';
+import * as pdfjs from 'pdfjs-dist';
+import type { PDFDocumentProxy, PDFPageProxy, PageViewport } from 'pdfjs-dist';
+import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
+import { boot, type BootApi } from '@/content/index';
+import { docPath, fileNameFromUrl, parseSrc, redactedFileName, sha256Hex, viewRectsToPageRects, type PageBox } from '@/pdf/geometry';
+import { loadPdfBytes, SourceError } from '@/pdf/source';
+import { buildFlattened, buildVector, saveBytes } from '@/pdf/redact';
+
+/*
+ * The extension's own PDF viewer. Chrome's built-in viewer cannot be
+ * scripted, so PDFs are opened here instead: pdf.js draws each page to a
+ * canvas and lays its text layer on top, and the ordinary sticker engine
+ * (the content script's boot()) runs in this page against that DOM.
+ *
+ * Privacy: the only request this page makes is for the PDF the user opened.
+ * pdf.js loads its worker, CMaps, standard fonts and decoders from the
+ * extension package. Nothing about the document is stored except the
+ * scope key (16 hex digits of its SHA-256, spelled as letters) and the
+ * stickers' geometry.
+ */
+
+const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
+const pagesEl = $<HTMLDivElement>('pages');
+const statusEl = $<HTMLParagraphElement>('status');
+const titleEl = $<HTMLElement>('title');
+const fileInput = $<HTMLInputElement>('file');
+const btnPick = $<HTMLButtonElement>('pick');
+const btnRect = $<HTMLButtonElement>('rect');
+const btnDone = $<HTMLButtonElement>('done');
+const btnClear = $<HTMLButtonElement>('clear');
+const btnDownload = $<HTMLButtonElement>('download');
+const chkVector = $<HTMLInputElement>('vector');
+const drop = $<HTMLDivElement>('drop');
+
+const asset = (p: string) => chrome.runtime.getURL(`pdfjs/${p}`);
+pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
+
+interface PageView {
+  index: number;
+  page: PDFPageProxy;
+  /** Scale 1, rotation applied: the page in PDF points. */
+  base: PageViewport;
+  view: PageViewport;
+  el: HTMLDivElement;
+  canvas: HTMLCanvasElement;
+  rendered: boolean;
+}
+
+interface Loaded {
+  doc: PDFDocumentProxy;
+  bytes: Uint8Array;
+  name: string;
+  key: string;
+  pages: PageView[];
+}
+
+let current: Loaded | null = null;
+/** Scope path stickers match against: `/pdf/<key>` once a document is shown. */
+let scopePath = '/pdf';
+let engine: BootApi | undefined;
+let observer: IntersectionObserver | null = null;
+let loadSeq = 0;
+
+function setState(s: 'empty' | 'loading' | 'ready' | 'error') {
+  document.body.dataset.state = s;
+  const ready = s === 'ready';
+  btnPick.disabled = btnRect.disabled = btnDone.disabled = btnClear.disabled = btnDownload.disabled = !ready;
+}
+
+function status(text: string, error = false) {
+  statusEl.textContent = text;
+  statusEl.classList.toggle('error', error);
+}
+
+// ---- rendering ----
+
+const renderQueue: PageView[] = [];
+let rendering = false;
+
+async function pumpRender() {
+  if (rendering) return;
+  rendering = true;
+  try {
+    while (renderQueue.length) {
+      const pv = renderQueue.shift()!;
+      if (pv.rendered || !pv.el.isConnected) continue;
+      pv.rendered = true;
+      const dpr = window.devicePixelRatio || 1;
+      const vp = pv.page.getViewport({ scale: pv.view.scale * dpr });
+      pv.canvas.width = Math.ceil(vp.width);
+      pv.canvas.height = Math.ceil(vp.height);
+      try {
+        await pv.page.render({ canvas: pv.canvas, canvasContext: pv.canvas.getContext('2d')!, viewport: vp }).promise;
+      } catch (e) {
+        console.warn('[aibs] page render failed', pv.index + 1, e);
+      }
+    }
+  } finally {
+    rendering = false;
+  }
+}
+
+/**
+ * Text layer for one page. Rendered into a detached element first (pdf.js
+ * measures text on a canvas, not through layout), then every span gets a
+ * fixed width matching its glyphs on the canvas. Masking turns covered text
+ * into bullets, which are narrower than digits; without the fixed width a
+ * covered span, and the sticker drawn over it, would shrink and leave part
+ * of the canvas glyphs showing.
+ */
+async function renderTextLayer(pv: PageView): Promise<void> {
+  const content = await pv.page.getTextContent();
+  const layer = document.createElement('div');
+  layer.className = 'textLayer';
+  const tl = new pdfjs.TextLayer({ textContentSource: content, container: layer, viewport: pv.view });
+  await tl.render();
+  const minFont = Number(layer.style.getPropertyValue('--min-font-size')) || 1;
+  const items = content.items.filter((it): it is (typeof content.items)[number] & { str: string; width: number; height: number } => 'str' in it);
+  tl.textDivs.forEach((div, i) => {
+    const it = items[i];
+    if (!it || !it.str) return;
+    const scaleX = Number(div.style.getPropertyValue('--scale-x')) || 0;
+    if (!(scaleX > 0)) return;
+    const vertical = content.styles[(it as { fontName?: string }).fontName ?? '']?.vertical;
+    const w = ((vertical ? it.height : it.width) * pv.view.scale * minFont) / scaleX;
+    if (w > 0 && Number.isFinite(w)) div.style.width = `${w}px`;
+  });
+  pv.el.appendChild(layer);
+}
+
+function clearPages() {
+  observer?.disconnect();
+  observer = null;
+  renderQueue.length = 0;
+  pagesEl.replaceChildren();
+}
+
+async function show(bytes: Uint8Array, name: string) {
+  const seq = ++loadSeq;
+  setState('loading');
+  status('Opening…');
+  // Stickers of the previous document stop applying before its pages go.
+  scopePath = '/pdf';
+  engine?.refresh();
+  if (current) {
+    void current.doc.destroy();
+    current = null;
+  }
+  clearPages();
+
+  const hash = await sha256Hex(bytes);
+  // pdf.js transfers the buffer it is given to its worker: keep our own copy.
+  const doc = await pdfjs.getDocument({
+    data: bytes.slice(),
+    cMapUrl: asset('cmaps/'),
+    cMapPacked: true,
+    standardFontDataUrl: asset('standard_fonts/'),
+    wasmUrl: asset('wasm/'),
+    iccUrl: asset('iccs/'),
+    enableXfa: false,
+    isOffscreenCanvasSupported: true,
+  }).promise;
+  if (seq !== loadSeq) {
+    void doc.destroy();
+    return;
+  }
+
+  const pages: PageView[] = [];
+  const first = await doc.getPage(1);
+  const firstBase = first.getViewport({ scale: 1 });
+  const avail = Math.max(320, (document.getElementById('viewer')?.clientWidth ?? innerWidth) - 48);
+  const scale = Math.min(1.5, Math.max(0.5, avail / firstBase.width));
+  for (let i = 0; i < doc.numPages; i++) {
+    const page = i === 0 ? first : await doc.getPage(i + 1);
+    const base = page.getViewport({ scale: 1 });
+    const view = page.getViewport({ scale });
+    const el = document.createElement('div');
+    el.className = 'page';
+    el.id = `page-${i + 1}`;
+    el.dataset.pageNumber = String(i + 1);
+    el.style.width = `${view.width}px`;
+    el.style.height = `${view.height}px`;
+    el.style.setProperty('--scale-factor', String(scale));
+    el.style.setProperty('--total-scale-factor', String(scale));
+    const canvas = document.createElement('canvas');
+    canvas.setAttribute('aria-hidden', 'true');
+    el.appendChild(canvas);
+    pagesEl.appendChild(el);
+    pages.push({ index: i, page, base, view, el, canvas, rendered: false });
+  }
+
+  // Canvases render lazily, nearest pages first.
+  observer = new IntersectionObserver(
+    (entries) => {
+      for (const e of entries) {
+        if (!e.isIntersecting) continue;
+        const pv = pages.find((p) => p.el === e.target);
+        if (pv && !pv.rendered) renderQueue.push(pv);
+      }
+      void pumpRender();
+    },
+    { rootMargin: '800px 0px' },
+  );
+  pages.forEach((p) => observer!.observe(p.el));
+
+  // Text layers for every page, one after another, before the document's
+  // stickers are applied: the masker and the scanner need the text, and an
+  // element sticker on page 9 must find its span.
+  for (const pv of pages) {
+    if (seq !== loadSeq) return;
+    status(`Reading text… page ${pv.index + 1} of ${pages.length}`);
+    await renderTextLayer(pv);
+  }
+  if (seq !== loadSeq) return;
+
+  const key = docPath(hash);
+  current = { doc, bytes, name, key, pages };
+  scopePath = key;
+  const src = parseSrc(location.search);
+  history.replaceState(null, '', `${location.pathname}${src ? location.search : ''}#doc=${key.slice(5)}`);
+  document.body.dataset.docKey = key.slice(5);
+  titleEl.textContent = name;
+  titleEl.title = name;
+  document.title = `${name} - Sticker PDF viewer`;
+  engine?.refresh();
+  setState('ready');
+  status(`${pages.length} page${pages.length === 1 ? '' : 's'}`);
+}
+
+// ---- download ----
+
+async function download() {
+  const cur = current;
+  if (!cur || !engine) return;
+  const vector = chkVector.checked;
+  if (vector && engine.locked) {
+    status('Locked: vector mode keeps the text under the boxes, so only the flattened download is available.', true);
+    return;
+  }
+  const { rects, lost } = engine.geometry();
+  if (lost > 0 && !confirm(`${lost} sticker${lost === 1 ? ' is' : 's are'} not attached right now and will not be redacted. Download anyway?`)) return;
+  const boxes: PageBox[] = cur.pages.map((p) => {
+    const r = p.el.getBoundingClientRect();
+    return { box: { x: r.left, y: r.top, w: r.width, h: r.height }, width: p.base.width, height: p.base.height };
+  });
+  const pageRects = viewRectsToPageRects(rects, boxes);
+  btnDownload.disabled = true;
+  try {
+    status(vector ? 'Drawing boxes…' : 'Flattening pages…');
+    const out = vector
+      ? await buildVector(cur.doc, cur.bytes, pageRects)
+      : await buildFlattened(cur.doc, pageRects, (d, t) => status(`Flattening page ${d} of ${t}…`));
+    saveBytes(out, redactedFileName(cur.name));
+    status(
+      vector
+        ? `Saved with ${pageRects.length} box${pageRects.length === 1 ? '' : 'es'}. Not a redaction: the text under them is still in the file.`
+        : `Saved ${cur.pages.length} flattened page${cur.pages.length === 1 ? '' : 's'} with ${pageRects.length} redaction${pageRects.length === 1 ? '' : 's'}.`,
+    );
+  } catch (e) {
+    status(`Could not build the PDF: ${e instanceof Error ? e.message : String(e)}`, true);
+  } finally {
+    btnDownload.disabled = current === null;
+  }
+}
+
+// ---- sources ----
+
+function explain(e: unknown, src: string) {
+  setState('error');
+  if (e instanceof SourceError) {
+    const info = e.info;
+    if (info.kind === 'permission') {
+      status(`This extension needs access to ${info.origin} to open the PDF.`, true);
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = `Allow access to ${info.origin}`;
+      b.onclick = async () => {
+        let ok = false;
+        try {
+          ok = await chrome.permissions.request({ origins: [`${info.origin}/*`] });
+        } catch {
+          ok = false;
+        }
+        if (ok) void openSrc(src);
+      };
+      statusEl.append(' ', b);
+      return;
+    }
+    if (info.kind === 'file-access') {
+      status('To open files from this computer by link, turn on "Allow access to file URLs" for AI Blocker Stickers in chrome://extensions, or use Open file….', true);
+      return;
+    }
+    if (info.kind === 'status') {
+      status(`The server answered ${info.status}.`, true);
+      return;
+    }
+    status(`Could not download the PDF: ${info.message}`, true);
+    return;
+  }
+  status(`Could not open the PDF: ${e instanceof Error ? e.message : String(e)}`, true);
+}
+
+async function openSrc(src: string) {
+  setState('loading');
+  status('Downloading…');
+  try {
+    const bytes = await loadPdfBytes(src);
+    await show(bytes, fileNameFromUrl(src) ?? 'document.pdf');
+  } catch (e) {
+    explain(e, src);
+  }
+}
+
+async function openFile(file: File) {
+  try {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    // A picked file has no URL to come back to: drop any ?src= from the address.
+    history.replaceState(null, '', location.pathname);
+    await show(bytes, file.name);
+  } catch (e) {
+    explain(e, '');
+  }
+}
+
+fileInput.addEventListener('change', () => {
+  const f = fileInput.files?.[0];
+  if (f) void openFile(f);
+  fileInput.value = '';
+});
+for (const t of ['dragenter', 'dragover'] as const) {
+  window.addEventListener(t, (e) => {
+    if (!e.dataTransfer?.types.includes('Files')) return;
+    e.preventDefault();
+    drop.classList.add('over');
+  });
+}
+window.addEventListener('dragleave', () => drop.classList.remove('over'));
+window.addEventListener('drop', (e) => {
+  drop.classList.remove('over');
+  const f = e.dataTransfer?.files?.[0];
+  if (!f) return;
+  e.preventDefault();
+  void openFile(f);
+});
+
+btnPick.onclick = () => engine?.startPick();
+btnRect.onclick = () => engine?.startRect();
+btnDone.onclick = () => engine?.setEditing(false);
+btnClear.onclick = () => {
+  const n = engine?.stickerCount ?? 0;
+  if (!engine || n === 0) return status('No stickers on this document.');
+  if (!confirm(`Remove all ${n} sticker${n === 1 ? '' : 's'} on this document?`)) return;
+  const r = engine.removeAll();
+  status(r.ok ? `Removed ${r.removed} sticker${r.removed === 1 ? '' : 's'}.` : 'Locked: stickers stay on.', !r.ok);
+};
+btnDownload.onclick = () => void download();
+
+async function main() {
+  // pdf.html is web-accessible (the "always open PDFs here" redirect needs
+  // that). Refuse to run framed, so no site can embed it.
+  if (window.top !== window) {
+    document.body.replaceChildren(document.createTextNode('The sticker PDF viewer cannot be embedded.'));
+    return;
+  }
+  setState('empty');
+  try {
+    engine = await boot({ pagePath: () => scopePath, forceDom: true });
+  } catch (e) {
+    console.error('[aibs] sticker engine failed to start', e);
+  }
+  const src = parseSrc(location.search);
+  if (src) {
+    titleEl.textContent = fileNameFromUrl(src) ?? 'Sticker PDF viewer';
+    await openSrc(src);
+  }
+}
+
+void main();
