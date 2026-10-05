@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#14837c"/>
+      <stop offset="1" stop-color="#0b5a55"/>
+    </linearGradient>
+  </defs>
+  <!-- Accent rounded square -->
+  <rect x="4" y="4" width="120" height="120" rx="28" fill="url(#bg)"/>
+  <!-- Soft shadow under the sticker -->
+  <path d="M30 44 H82 L100 62 V92 a5 5 0 0 1 -5 5 H35 a5 5 0 0 1 -5 -5 Z" fill="#000" opacity="0.18"/>
+  <!-- White rectangular sticker with one folded corner (top right) -->
+  <path d="M33 38 H80 L98 56 V86 a5 5 0 0 1 -5 5 H33 a5 5 0 0 1 -5 -5 V43 a5 5 0 0 1 5 -5 Z" fill="#ffffff"/>
+  <path d="M80 38 V51 a5 5 0 0 0 5 5 H98 Z" fill="#a7dcd6"/>
+</svg>

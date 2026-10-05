@@ -2,6 +2,7 @@ import type { ViewRect } from '@/shared/types';
 import type { OverlayHost } from './host';
 import { clientRects, union } from '../anchor/geometry';
 import { matchRect, type Suggestion } from '../detect/scanner';
+import { icon } from '@/shared/icons';
 
 export interface SuggestViewCallbacks {
   onCover(id: string): void;
@@ -115,7 +116,7 @@ export class SuggestView {
     chip.className = 'sg-chip';
     const name = document.createElement('span');
     name.className = 'sg-name';
-    name.textContent = s.name;
+    name.append(icon('sparkle', 12), s.name);
     const cover = document.createElement('button');
     cover.type = 'button';
     cover.className = 'sg-cover';
@@ -123,8 +124,9 @@ export class SuggestView {
     const dismiss = document.createElement('button');
     dismiss.type = 'button';
     dismiss.className = 'sg-x';
-    dismiss.textContent = '×';
+    dismiss.appendChild(icon('close', 12));
     dismiss.title = 'Not sensitive';
+    dismiss.setAttribute('aria-label', 'Not sensitive');
     // Trusted clicks only: a page script cannot cover or dismiss on the user's behalf.
     const on = (b: HTMLButtonElement, fn: () => void) =>
       b.addEventListener('click', (e) => {

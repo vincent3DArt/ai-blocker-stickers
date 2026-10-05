@@ -9,6 +9,8 @@ import { Positioner } from './overlay/positioner';
 import { Picker } from './overlay/picker';
 import { RectDraw } from './overlay/rect-draw';
 import { Toolbar, type ToolbarAction } from './overlay/toolbar';
+import { EditChrome } from './overlay/edit-chrome';
+import { defaultPathPattern, prefixPathPattern, sanitizePathPattern } from '@/shared/url-match';
 import { Peek, type PeekTarget } from './overlay/peek';
 import { MutationHub } from './mask/guard';
 import { Masker } from './mask/masker';
@@ -512,6 +514,81 @@ export async function boot(opts: BootOptions = {}): Promise<BootApi | undefined>
         break;
     }
   }
+
+  // ---- edit mode: hover action bar (delete, expand to parent, scope) ----
+  let chromeEl: Element | null = null;
+  let chromeHideTimer = 0;
+  const editChrome = new EditChrome(host, {
+    onDelete: (id) => {
+      if (lock.locked) return void refuse('DELETE_STICKER');
+      editChrome.hide();
+      session.remove(id);
+    },
+    onExpand: (id) => {
+      if (lock.locked) return void refuse('reattach');
+      const parent = chromeEl?.parentElement;
+      if (!parent || parent === document.body || parent === document.documentElement || isOurs(parent)) return;
+      editChrome.hide();
+      void session.reattach(id, parent).then(() => {
+        positioner.flush();
+        if (depth === 0) toolbar.toast('Sticker expanded to the parent element.');
+      });
+    },
+    onScope: (id, value) => {
+      if (lock.locked) return void refuse('SET_SCOPE');
+      const exact = value === 'exact';
+      void session.setScope(id, exact ? 'exact' : 'pattern', exact ? undefined : value.slice('pattern:'.length)).then(() => positioner.flush());
+    },
+  });
+  toolbar.onHidden = () => editChrome.hide();
+  window.addEventListener(
+    'mousemove',
+    (e) => {
+      if (!e.isTrusted) return;
+      if (!editing || lock.locked || picker || rectDraw) {
+        if (editChrome.visible) editChrome.hide();
+        return;
+      }
+      if (editChrome.hovering) {
+        clearTimeout(chromeHideTimer);
+        return;
+      }
+      const hit = session.stickerAt(e.clientX, e.clientY);
+      if (!hit) {
+        if (editChrome.visible && !chromeHideTimer) {
+          chromeHideTimer = window.setTimeout(() => {
+            chromeHideTimer = 0;
+            if (!editChrome.hovering) editChrome.hide();
+          }, 350);
+        }
+        return;
+      }
+      clearTimeout(chromeHideTimer);
+      chromeHideTimer = 0;
+      if (hit.sticker.id === editChrome.targetId) return;
+      chromeEl = hit.el;
+      const sum = session.summaries().find((s) => s.id === hit.sticker.id);
+      const path = sum?.currentPath || '/';
+      const scopes = [{ value: 'exact', label: 'This page only' }];
+      const add = (pattern: string, label: string) => {
+        if (!scopes.some((o) => o.value === 'pattern:' + pattern)) scopes.push({ value: 'pattern:' + pattern, label });
+      };
+      add(defaultPathPattern(path), 'Pages like this');
+      add(prefixPathPattern(path), 'This section');
+      add('/**', 'Whole site');
+      const parent = hit.el?.parentElement;
+      editChrome.show({
+        id: hit.sticker.id,
+        rect: hit.rect,
+        label: hit.sticker.label || (hit.sticker.kind === 'rect' ? 'Rectangle' : 'Element'),
+        canExpand: hit.sticker.kind === 'element' && !!parent && parent !== document.body && parent !== document.documentElement,
+        scopes,
+        currentScope: !sum || sum.scopeKind === 'exact' ? 'exact' : 'pattern:' + sanitizePathPattern(sum.pathPattern),
+      });
+    },
+    { capture: true, passive: true },
+  );
+  window.addEventListener('scroll', () => editChrome.visible && editChrome.hide(), { capture: true, passive: true });
 
   // ---- AI-session lock: enforcement ----
   function applyLock(next: LockState) {

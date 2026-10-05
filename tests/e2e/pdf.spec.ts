@@ -5,7 +5,7 @@
  */
 import type { Page } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
-import { test, expect, boxOf, ORIGIN, type Ext } from './fixtures';
+import { test, expect, boxOf, coverage, ORIGIN, type Ext } from './fixtures';
 
 const SSN = '123-45-6789';
 
@@ -149,6 +149,31 @@ test.describe('PDF viewer', () => {
     await page.click('#clear');
     await expect.poll(async () => (await ext.state(page)).stickers.length).toBe(0);
     expect(await page.locator('#page-1 .textLayer').innerText()).toContain(SSN);
+  });
+
+  test('zoom: stickers stay on their text and region', async ({ page, ext }) => {
+    await openViewer(page, ext, 'sample.pdf');
+    const sel = await ssnSelector(page);
+    await ext.cover(page, sel);
+    const p1 = await boxOf(page, '#page-1');
+    const s = p1.w / 612;
+    await ext.rect(page, { x: p1.x + 300 * s, y: p1.y + 60 * s, w: 200 * s, h: 40 * s });
+    const before = (await ext.state(page)).pieces;
+    await expect(page.locator('#zoom-level')).toHaveText('100%');
+    await page.click('#zoom-in');
+    await page.click('#zoom-in');
+    await expect(page.locator('#zoom-level')).toHaveText('125%');
+    await page.evaluate(() => document.getElementById('viewer')!.scrollTo(0, 0));
+    await expect
+      .poll(async () => coverage(await boxOf(page, sel), (await ext.state(page)).pieces), { timeout: 5000 })
+      .toBeGreaterThanOrEqual(0.98);
+    const p1z = await boxOf(page, '#page-1');
+    expect(p1z.w / p1.w).toBeCloseTo(1.25, 2);
+    const wide = (ps: { w: number }[]) => Math.max(...ps.map((p) => p.w));
+    await expect.poll(async () => wide((await ext.state(page)).pieces) / wide(before), { timeout: 5000 }).toBeGreaterThan(1.2);
+    expect(await page.evaluate(() => document.body.innerText)).not.toContain(SSN);
+    await page.click('#zoom-out');
+    await expect(page.locator('#zoom-level')).toHaveText('110%');
   });
 
   test('auto-suggest scans the text layer', async ({ page, ext }) => {
