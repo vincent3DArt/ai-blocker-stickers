@@ -53,7 +53,7 @@ export class StickerView {
       p.classList.toggle('peek', this.peeking);
       const label = p.querySelector<HTMLSpanElement>('.label');
       if (label) {
-        const text = status === 'lost' ? 'sticker lost, click to re-attach' : i === 0 ? this.labelText() : '';
+        const text = status === 'lost' ? 'Lost: click to re-attach' : i === 0 ? this.labelText() : '';
         label.textContent = text;
         label.style.display = text && r.w >= 40 && r.h >= 12 ? '' : 'none';
       }

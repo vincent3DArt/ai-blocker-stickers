@@ -12,6 +12,18 @@ the region is marked `aria-hidden`, so page-reading agents get nothing useful ei
 backs up the other. You place stickers by hand, or accept the ones the extension suggests for
 numbers that look sensitive; during an AI session it covers those on its own.
 
+## Screenshots
+
+- [Popup, light](docs/screenshots/popup-light.png): site status, the four placement tools and the stickers on the page.
+- [Popup, dark](docs/screenshots/popup-dark.png): the same in dark mode.
+- [Popup, locked](docs/screenshots/popup-locked.png): an AI session in progress.
+- [Picker](docs/screenshots/overlay-picker.png): edit mode with the toolbar and the element highlight.
+- [Hover actions](docs/screenshots/overlay-edit.png): delete, expand to parent and scope over a sticker in edit mode.
+- [Lost sticker](docs/screenshots/overlay-lost.png): its content is gone; click it to re-attach.
+- [Suggestions](docs/screenshots/overlay-suggestions.png): detected numbers with Cover and dismiss chips.
+- [PDF viewer](docs/screenshots/pdf-viewer.png): a covered SSN, zoom and the redacted download.
+- [PDF viewer, empty](docs/screenshots/pdf-empty-dark.png): the drop zone in dark mode.
+
 ## How a sticker stays put
 
 A sticker attaches to content, not to screen coordinates. When you place one, the extension builds a
@@ -104,7 +116,9 @@ permission for that origin only. It needs that permission to register a content 
 `document_start`, so stickers are in place before the page first paints. Without it, sensitive
 content would be visible for a frame or two on every load.
 
-**Edit mode.** Press `Alt+Shift+S`, or use the popup button. A small toolbar appears.
+**Edit mode.** Press `Alt+Shift+S`, or use the popup button. A small toolbar appears. Drag it by its
+handle to move it; it remembers the spot. Hover a sticker for a small action bar: delete, expand to
+the parent element, and where it applies.
 
 **Cover element.** Hover to highlight a candidate. Arrow keys expand the selection to the parent or
 shrink it back. Click to place the sticker.
@@ -352,6 +366,9 @@ images, an SPA router reusing one component, a rich-text editor and a textarea, 
 page script that strips foreign elements, attributes and styles. Each page gets an element and a
 rectangle sticker. `tests/e2e/failclosed.spec.ts` covers the banner, the backstops and save
 failures; `tests/e2e/boot-gap.spec.ts` measures how long a secret stays readable after it appears.
+
+`AIBS_SCREENSHOTS=1 playwright test screenshots` (after a development build) regenerates
+`docs/screenshots/`. `node scripts/make-icons.mjs` renders `public/icon/icon.svg` to the PNG icons.
 
 **Test data.** Every SSN, EIN, and account number in `fixtures/` is invented. None of them is a real
 identifier. `pnpm scan` checks the rest of the repository for real-looking numbers, keys, and email

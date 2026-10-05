@@ -103,8 +103,16 @@ export class Picker {
     this.highlight.style.transform = `translate(${box.x}px, ${box.y}px)`;
     this.highlight.style.width = `${box.w}px`;
     this.highlight.style.height = `${box.h}px`;
-    const id = el.id ? `#${el.id}` : '';
-    const cls = el.classList.length ? `.${Array.from(el.classList).slice(0, 2).join('.')}` : '';
-    this.tag.textContent = `${el.tagName.toLowerCase()}${id}${cls}  (↑ parent, ↓ child, Esc)`;
+    this.highlight.classList.toggle('tag-below', box.y < 30);
+    const name = document.createElement('span');
+    name.textContent = el.tagName.toLowerCase();
+    const role = el.getAttribute('role');
+    const roleEl = document.createElement('span');
+    roleEl.className = 'role';
+    roleEl.textContent = role ? role.slice(0, 24) : `${Math.round(box.w)} × ${Math.round(box.h)}`;
+    const keys = document.createElement('span');
+    keys.className = 'keys';
+    keys.textContent = '↑ parent  ↓ child  Esc';
+    this.tag.replaceChildren(name, roleEl, keys);
   }
 }

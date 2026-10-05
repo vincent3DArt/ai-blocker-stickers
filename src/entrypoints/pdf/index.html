@@ -8,28 +8,56 @@
   <body data-state="empty">
     <header id="bar">
       <div class="row">
-        <strong id="title">Sticker PDF viewer</strong>
-        <label class="btn" title="Open a PDF from this computer">
-          Open file…
+        <div class="file">
+          <img class="mark" src="/icon/32.png" alt="" width="22" height="22" />
+          <strong id="title">Sticker PDF viewer</strong>
+          <span id="page-indicator" class="pill" aria-live="polite"></span>
+        </div>
+        <label class="btn ghost" title="Open a PDF from this computer" data-icon="upload">
+          <span>Open file…</span>
           <input id="file" type="file" accept="application/pdf,.pdf" hidden />
         </label>
         <span class="sep"></span>
-        <button id="pick" type="button" disabled>Cover element</button>
-        <button id="rect" type="button" disabled>Draw rectangle</button>
-        <button id="done" type="button" disabled>Done</button>
-        <button id="clear" type="button" disabled title="Remove every sticker on this document">Remove stickers</button>
+        <div class="group" role="group" aria-label="Stickers">
+          <button id="pick" type="button" data-icon="sticker" disabled>Cover element</button>
+          <button id="rect" type="button" data-icon="rect" disabled>Draw rectangle</button>
+          <button id="done" type="button" data-icon="check" disabled>Done</button>
+        </div>
         <span class="sep"></span>
-        <button id="download" type="button" class="primary" disabled>Download redacted PDF</button>
+        <div class="group zoom" role="group" aria-label="Zoom">
+          <button id="zoom-out" type="button" class="icon-only" data-icon="minus" title="Zoom out" aria-label="Zoom out" disabled></button>
+          <span id="zoom-level" class="zoom-level">100%</span>
+          <button id="zoom-in" type="button" class="icon-only" data-icon="plus" title="Zoom in" aria-label="Zoom in" disabled></button>
+        </div>
+        <span class="spacer"></span>
+        <button id="clear" type="button" class="ghost danger" data-icon="trash" disabled title="Remove every sticker on this document">Remove stickers</button>
+      </div>
+      <div class="row sub">
         <label class="vector" title="Draws black boxes over the original pages. The text stays in the file and can still be copied or extracted.">
           <input id="vector" type="checkbox" /> Keep text outside stickers (vector) <em>not a true redaction: text under the boxes stays extractable</em>
         </label>
+        <span class="spacer"></span>
+        <button id="download" type="button" class="primary" data-icon="download" disabled>Download redacted PDF</button>
       </div>
       <p id="note">Redacted PDFs are flattened to images, so text under stickers is gone and the file is larger.</p>
       <p id="status" role="status"></p>
     </header>
     <main id="viewer">
       <div id="drop" class="drop">
-        <p>Drop a PDF here, or use <strong>Open file…</strong>.</p>
+        <svg class="drop-art" viewBox="0 0 160 120" width="160" height="120" aria-hidden="true">
+          <rect x="30" y="10" width="80" height="100" rx="8" class="paper" />
+          <path d="M90 10 h12 a8 8 0 0 1 8 8 v12 z" class="fold" />
+          <rect x="44" y="30" width="44" height="6" rx="3" class="line" />
+          <rect x="44" y="44" width="52" height="6" rx="3" class="line" />
+          <rect x="44" y="58" width="30" height="10" rx="2" class="sticker" />
+          <rect x="78" y="60" width="18" height="6" rx="3" class="line" />
+          <rect x="44" y="76" width="48" height="6" rx="3" class="line" />
+          <circle cx="116" cy="88" r="18" class="badge" />
+          <path d="M116 97 V80 M109 86 l7 -7 7 7" class="arrow" />
+        </svg>
+        <p class="drop-title">Drop a PDF here</p>
+        <p class="muted">or</p>
+        <label for="file" class="btn primary" data-icon="upload">Choose a PDF…</label>
         <p class="muted">The file stays on this computer. Only the stickers' position and a short fingerprint of the file are stored.</p>
       </div>
       <div id="pages"></div>

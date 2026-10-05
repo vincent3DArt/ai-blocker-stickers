@@ -20,6 +20,7 @@ export interface OverlayHost {
 const TAG = 'aibs-host';
 /** Set once the stickers are in place; the boot cloak keys on it. */
 const READY_ATTR = 'data-aibs-ready';
+const DEFAULT_COLOR = '#1f2937';
 
 const HOST_ATTRS: Array<[string, string]> = [
   ['popover', 'manual'],
@@ -38,7 +39,8 @@ export function mountHost(): OverlayHost {
   /** (Re)write every inline declaration; afterwards the attribute is known to be ours. */
   function styleHost() {
     applyHostStyle(el);
-    if (color) el.style.setProperty('--aibs-color', color);
+    // !important: an inline normal declaration loses to a page's `aibs-host{--aibs-color:… !important}`.
+    if (color) el.style.setProperty('--aibs-color', color, 'important');
     if (fallbackZ) el.style.setProperty('z-index', '2147483647', 'important');
     expectedStyle = el.getAttribute('style');
   }
@@ -61,6 +63,14 @@ export function mountHost(): OverlayHost {
   ui.id = 'ui';
   ui.setAttribute('aria-hidden', 'true');
   root.append(layer, ui);
+  /**
+   * The colour pieces actually paint with lives on #layer, inside the closed
+   * shadow root, where no page rule can reach. Custom properties inherit
+   * through the host, so reading `--aibs-color` from the host would let a
+   * page stylesheet make every sticker transparent.
+   */
+  const setPieceColor = (c: string) => layer.style.setProperty('--aibs-piece', c || DEFAULT_COLOR, 'important');
+  setPieceColor('');
 
   let usingTopLayer = false;
   let lastTopLayerSignature = '';
@@ -171,6 +181,7 @@ export function mountHost(): OverlayHost {
     reassert,
     setColor(c) {
       color = c;
+      setPieceColor(c);
       styleHost();
     },
     markReady() {

@@ -596,6 +596,26 @@ test.describe('red team: tampering', () => {
     }
     cleanAll({ innerText: await pageInnerText(page) });
   });
+
+  test('14b page CSS cannot recolour, fade, blur or hide the stickers from outside the shadow root', async ({ page, ext }) => {
+    await setupStatic(page, ext);
+    const cell = await boxOf(page, '#ssn-cell');
+    await expect.poll(() => coveredAt(page, cell), { timeout: 3000 }).toBe(true);
+    await page.evaluate(() => {
+      const s = document.createElement('style');
+      // Custom properties and inherited properties set on the host flow into
+      // a shadow tree; descendant selectors cannot pierce it but are tried anyway.
+      s.textContent = [
+        'aibs-host{--aibs-color:transparent!important;--aibs-piece:transparent!important;--accent:transparent!important;color:transparent!important;opacity:0!important;filter:blur(20px)!important;visibility:hidden!important;font-size:0!important}',
+        'aibs-host *, aibs-host::part(piece), html aibs-host > *{visibility:hidden!important;background:transparent!important;opacity:0!important}',
+      ].join('\n');
+      document.head.appendChild(s);
+    });
+    await page.waitForTimeout(200);
+    await expect.poll(() => coveredAt(page, cell), { timeout: 3000, message: 'sticker pixels after page CSS' }).toBe(true);
+    expect(await page.textContent('#ssn-cell')).toBe('•'.repeat(11));
+    cleanAll({ innerText: await pageInnerText(page) });
+  });
 });
 
 test.describe('red team: peek abuse', () => {

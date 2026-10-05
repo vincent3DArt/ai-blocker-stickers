@@ -6,6 +6,7 @@ import { boot, type BootApi } from '@/content/index';
 import { docPath, fileNameFromUrl, parseSrc, redactedFileName, sha256Hex, viewRectsToPageRects, type PageBox } from '@/pdf/geometry';
 import { loadPdfBytes, SourceError } from '@/pdf/source';
 import { buildFlattened, buildVector, saveBytes } from '@/pdf/redact';
+import { icon, type IconName } from '@/shared/icons';
 
 /*
  * The extension's own PDF viewer. Chrome's built-in viewer cannot be
@@ -32,6 +33,14 @@ const btnClear = $<HTMLButtonElement>('clear');
 const btnDownload = $<HTMLButtonElement>('download');
 const chkVector = $<HTMLInputElement>('vector');
 const drop = $<HTMLDivElement>('drop');
+const viewerEl = $<HTMLElement>('viewer');
+const btnZoomIn = $<HTMLButtonElement>('zoom-in');
+const btnZoomOut = $<HTMLButtonElement>('zoom-out');
+const zoomLevel = $<HTMLSpanElement>('zoom-level');
+const pageIndicator = $<HTMLSpanElement>('page-indicator');
+
+// Icons for the toolbar controls (data-icon in index.html).
+for (const el of document.querySelectorAll<HTMLElement>('[data-icon]')) el.prepend(icon(el.dataset.icon as IconName));
 
 const asset = (p: string) => chrome.runtime.getURL(`pdfjs/${p}`);
 pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
@@ -61,11 +70,17 @@ let scopePath = '/pdf';
 let engine: BootApi | undefined;
 let observer: IntersectionObserver | null = null;
 let loadSeq = 0;
+/** Scale that fits the first page to the window; `zoom` multiplies it. */
+let fitScale = 1;
+let zoom = 1;
+const ZOOMS = [0.5, 0.67, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2, 2.5, 3];
 
 function setState(s: 'empty' | 'loading' | 'ready' | 'error') {
   document.body.dataset.state = s;
   const ready = s === 'ready';
   btnPick.disabled = btnRect.disabled = btnDone.disabled = btnClear.disabled = btnDownload.disabled = !ready;
+  updateZoomUi();
+  updatePageIndicator();
 }
 
 function status(text: string, error = false) {
@@ -171,6 +186,8 @@ async function show(bytes: Uint8Array, name: string) {
   const firstBase = first.getViewport({ scale: 1 });
   const avail = Math.max(320, (document.getElementById('viewer')?.clientWidth ?? innerWidth) - 48);
   const scale = Math.min(1.5, Math.max(0.5, avail / firstBase.width));
+  fitScale = scale;
+  zoom = 1;
   for (let i = 0; i < doc.numPages; i++) {
     const page = i === 0 ? first : await doc.getPage(i + 1);
     const base = page.getViewport({ scale: 1 });
@@ -227,6 +244,89 @@ async function show(bytes: Uint8Array, name: string) {
   setState('ready');
   status(`${pages.length} page${pages.length === 1 ? '' : 's'}`);
 }
+
+// ---- zoom and page indicator ----
+
+function updateZoomUi() {
+  const ready = document.body.dataset.state === 'ready' && current !== null;
+  zoomLevel.textContent = `${Math.round(zoom * 100)}%`;
+  btnZoomOut.disabled = !ready || zoom <= ZOOMS[0];
+  btnZoomIn.disabled = !ready || zoom >= ZOOMS[ZOOMS.length - 1];
+}
+
+/**
+ * Resizes every page to `fitScale * next`. The text layer follows its CSS
+ * scale variables; the fixed span widths set in renderTextLayer are scaled by
+ * the same ratio, and canvases re-render (stretched meanwhile). Stickers are
+ * re-measured afterwards, so they stay on their text.
+ */
+function setZoom(next: number) {
+  const cur = current;
+  if (!cur || next === zoom) return;
+  const frac = viewerEl.scrollTop / Math.max(1, viewerEl.scrollHeight);
+  zoom = next;
+  const scale = fitScale * zoom;
+  for (const pv of cur.pages) {
+    const ratio = scale / pv.view.scale;
+    pv.view = pv.page.getViewport({ scale });
+    pv.el.style.width = `${pv.view.width}px`;
+    pv.el.style.height = `${pv.view.height}px`;
+    pv.el.style.setProperty('--scale-factor', String(scale));
+    pv.el.style.setProperty('--total-scale-factor', String(scale));
+    for (const span of pv.el.querySelectorAll<HTMLElement>('.textLayer span')) {
+      const w = parseFloat(span.style.width);
+      if (w > 0) span.style.width = `${w * ratio}px`;
+    }
+    pv.rendered = false;
+  }
+  viewerEl.scrollTop = frac * viewerEl.scrollHeight;
+  // Pages already on screen get no new IntersectionObserver entry: queue them here.
+  const vr = viewerEl.getBoundingClientRect();
+  for (const pv of cur.pages) {
+    const r = pv.el.getBoundingClientRect();
+    if (r.bottom > vr.top - 800 && r.top < vr.bottom + 800) renderQueue.push(pv);
+  }
+  void pumpRender();
+  engine?.refresh();
+  updateZoomUi();
+  updatePageIndicator();
+}
+
+function stepZoom(dir: 1 | -1) {
+  const next = dir > 0 ? ZOOMS.find((z) => z > zoom + 1e-6) : [...ZOOMS].reverse().find((z) => z < zoom - 1e-6);
+  if (next !== undefined) setZoom(next);
+}
+
+let indicatorFrame = 0;
+function updatePageIndicator() {
+  const cur = current;
+  if (!cur || document.body.dataset.state !== 'ready') {
+    pageIndicator.textContent = '';
+    return;
+  }
+  const vr = viewerEl.getBoundingClientRect();
+  const probe = vr.top + vr.height * 0.35;
+  let n = 1;
+  for (const pv of cur.pages) {
+    if (pv.el.getBoundingClientRect().top <= probe) n = pv.index + 1;
+    else break;
+  }
+  pageIndicator.textContent = `Page ${n} of ${cur.pages.length}`;
+}
+
+viewerEl.addEventListener(
+  'scroll',
+  () => {
+    if (indicatorFrame) return;
+    indicatorFrame = requestAnimationFrame(() => {
+      indicatorFrame = 0;
+      updatePageIndicator();
+    });
+  },
+  { passive: true },
+);
+btnZoomIn.onclick = () => stepZoom(1);
+btnZoomOut.onclick = () => stepZoom(-1);
 
 // ---- download ----
 
