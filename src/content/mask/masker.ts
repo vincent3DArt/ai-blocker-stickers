@@ -422,6 +422,19 @@ export class Masker {
     }
   }
 
+  /**
+   * The page's own text of a Text node we masked (whole-element or rect
+   * split part), or undefined for a node we did not touch. Lets readers that
+   * must see the page's text (the in-page viewer identity) undo our bullets.
+   */
+  originalText(t: Text): string | undefined {
+    for (const rec of this.records.values()) {
+      const o = rec.texts.get(t);
+      if (o !== undefined) return o;
+    }
+    return undefined;
+  }
+
   isMaskedNode(node: Node): boolean {
     return !!this.recordFor(node);
   }

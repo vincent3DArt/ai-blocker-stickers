@@ -149,7 +149,9 @@ as "Auto-covered" in the meantime.
 generalised by default, so `/clients/123` becomes `/clients/*`. A path that names a document (a
 Google Drive/Docs id, a UUID, long hex) or a known document host (Drive, Docs, SharePoint, Dropbox,
 Box, Notion, HubSpot) defaults to "This page only", stored as an HMAC of the path, never the path
-itself. The popup offers This page only, Pages like this, This section and Whole site.
+itself. The popup offers This page only, Pages like this, This section and Whole site. A sticker
+placed inside an in-page viewer that keeps the page's URL (Drive's file preview) also remembers an
+HMAC of that document's first-page text and applies only while the same document is open there.
 
 ## PDFs
 

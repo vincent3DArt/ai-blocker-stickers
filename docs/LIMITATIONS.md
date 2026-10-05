@@ -220,3 +220,39 @@ and pdf.js's text layer on top, and the ordinary sticker engine runs there.
     file's SHA-256, spelled as letters so the scope sanitiser keeps it. The
     same bytes from another URL get the same stickers; a re-saved copy of
     the "same" document is a different file and starts empty.
+
+## In-page viewers (Drive's file preview)
+
+Some sites open a document in an overlay over the page without changing the
+URL. Google Drive's preview sits on `/drive/u/0/home`, and every file opened
+from there shares that URL. A sticker placed inside such a viewer (the
+nearest `role=dialog`, `aria-modal` or viewport-sized fixed layer that holds a
+`[role=document]`, or at least 200 characters of text) also stores a view
+identity: an HMAC of the first 1,500 characters of the viewer's document text,
+whitespace and the toolbar left out. It applies only while a viewer whose text
+hashes the same is open. Otherwise it is inactive: not tracked, no ghost, and
+the popup lists it only under "N stickers for other views".
+
+26. **Identity is the first page's text.** Two files whose first 1,500
+    characters read the same (two copies of a form, a template, an empty
+    scan with no text layer) share their stickers. A file whose first page
+    has no text at all hashes as empty and matches any viewer on that page.
+    A viewer that unloads page 1 while you read page 20 hashes differently
+    then, so stickers placed or shown on far pages go inactive until page 1
+    is back in the DOM. A file edited on its first page is a new view and
+    starts without stickers.
+27. **The viewer is checked on mutation batches.** Opening and closing are
+    seen on the next debounced batch (about 50 ms), plus the time the text
+    layer takes to render. During that window the reopened document's
+    covered text is readable; the mask lands as soon as the text is there.
+28. **Overlay detection is structural.** A viewer that is neither a dialog,
+    a modal, nor a fixed layer covering 60% of the viewport (an inline
+    preview pane, say) is treated as part of the page and the sticker gets
+    the ordinary URL scope. A sticker placed inside a large modal with a lot
+    of text (not a document viewer) gets a view identity too, and applies only
+    while that modal shows the same text.
+29. **Obfuscated class names are ignored.** Minified class names (Drive's
+    `a-b-Xa-La-mf-Ic`, `tORug`) change between deployments and are left out
+    of selectors. Inside a viewer an anchor is found again by its
+    `[role=document]`-rooted structural path and by its text HMAC; two lines
+    with identical text in the same document tie.

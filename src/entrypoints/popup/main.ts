@@ -441,6 +441,19 @@ async function render() {
   if (content.stickers.length === 0) list.append(h('li', { class: 'muted' }, 'No stickers on this page.'));
   for (const s of content.stickers) list.append(stickerRow(tabId, s, locked, lockTitle));
   app.append(list);
+  // Stickers placed inside an in-page viewer (a Drive file preview) for a
+  // document that is not open: not counted above, one collapsed line here.
+  const other = state.otherViews ?? 0;
+  if (other > 0) {
+    app.append(
+      h(
+        'details',
+        { class: 'muted', id: 'other-views' },
+        h('summary', {}, `${other} sticker${other === 1 ? '' : 's'} for other views`),
+        h('p', { class: 'hint' }, 'Placed inside a document preview on this page. They come back when that document is open again.'),
+      ),
+    );
+  }
 
   app.append(
     h(

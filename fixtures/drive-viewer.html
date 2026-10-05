@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Fixture: Drive home with an in-page file viewer</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 0; padding: 16px; }
+  #files { list-style: none; padding: 0; }
+  #files li { margin: 6px 0; }
+  .vw-page { position: relative; width: 600px; height: 780px; margin: 16px auto; background: #fff; box-shadow: 0 1px 4px rgba(0,0,0,.4); }
+  .vw-page > img { position: absolute; inset: 0; width: 100%; height: 100%; }
+  .vw-layer { position: absolute; inset: 0; }
+  .vw-layer > p { position: absolute; margin: 0; font: 11px/1 system-ui, sans-serif; white-space: nowrap; color: #111; }
+</style>
+</head>
+<body>
+<!--
+  Served at /drive-home. Mimics Google Drive's built-in preview: opening a
+  file shows an overlay dialog over the home page WITHOUT changing the URL.
+  Class names are obfuscated letter groups regenerated on every page load
+  (a new Drive deployment), the overlay lands after a random number of
+  sibling layers (its XPath changes), and the text layer of each page renders
+  lazily: page 1's 300 ms after the dialog, pages 2-3 later or on scroll.
+  No ids, no data-* attributes inside the viewer.
+-->
+<h1>My Drive</h1>
+<ul id="files">
+  <li><button type="button" id="open-a">Quarterly notes.pdf</button></li>
+  <li><button type="button" id="open-b">Physics handout.pdf</button></li>
+</ul>
+<p id="home-note">Recent files appear here. Nothing on this screen is a document.</p>
+<script>
+(() => {
+  const L = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ';
+  const g = (n) => Array.from({ length: n }, () => L[Math.floor(Math.random() * L.length)]).join('');
+  const grp = () => g(1 + Math.floor(Math.random() * 2));
+  // Drive-style obfuscated classes: "a-b-Xa-La" and friends, new on every load.
+  const base = 'a-b-' + grp();
+  const C = {
+    wrap: g(5), dialog: 'a-b-' + grp() + '-' + grp(), sh: base + '-' + grp(), main: base + '-' + grp() + '-' + grp(),
+    xa: base + '-' + grp(), scroller: base + '-' + grp() + '-' + grp(), doc: base + '-' + grp() + '-' + grp(),
+    toolbar: base + '-' + grp() + '-' + grp(), page: base + '-' + grp() + '-' + grp(), layer: base + '-' + grp() + '-' + grp() + '-' + grp(), line: base + '-' + grp() + '-' + grp() + '-' + grp(),
+  };
+
+  // Deterministic document text, three pages per file.
+  const WORDS_A = ['integral', 'of', 'f', 'over', 'x', 'equals', 'capital', 'F', 'at', 'b', 'minus', 'a', 'derivative', 'sum', 'limit', 'theta', 'sine', 'cosine', 'alpha', 'beta'];
+  const WORDS_B = ['velocity', 'equals', 'distance', 'divided', 'by', 'time', 'force', 'mass', 'times', 'acceleration', 'energy', 'momentum', 'charge', 'field', 'wave', 'length', 'gravity', 'joule', 'newton', 'watt'];
+  function lines(words, page, n, seed) {
+    const out = [];
+    let s = seed + page * 7919;
+    for (let i = 0; i < n; i++) {
+      const w = [];
+      for (let k = 0; k < 9; k++) { s = (s * 1103515245 + 12345) % 2147483648; w.push(words[s % words.length]); }
+      out.push(`Formula ${page}.${i + 1}: ` + w.join(' '));
+    }
+    return out;
+  }
+  const FILES = {
+    A: { title: 'Quarterly notes.pdf', pages: [1, 2, 3].map((p) => lines(WORDS_A, p, 38, 11)) },
+    B: { title: 'Physics handout.pdf', pages: [1, 2, 3].map((p) => lines(WORDS_B, p, 38, 23)) },
+  };
+  // A's page 1 ends with the line the e2e suite covers.
+  FILES.A.pages[0].push('SSN 123-45-6789');
+
+  const BLANK = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
+  const el = (tag, cls, style) => { const e = document.createElement(tag); if (cls) e.className = cls; if (style) e.setAttribute('style', style); return e; };
+
+  let overlay = null;
+  let timers = [];
+  let current = null;
+
+  function renderText(page, text) {
+    if (page.querySelector('.' + C.layer)) return;
+    if (!page.querySelector('img')) { const img = el('img'); img.alt = ''; img.src = BLANK; page.append(img); }
+    const layer = el('div', C.layer + ' vw-layer');
+    text.forEach((t, i) => {
+      const p = el('p', C.line, `left: 8.2%; top: ${(3 + i * 2.4).toFixed(1)}%; width: 72.5%; height: 1.4%;`);
+      p.textContent = t;
+      layer.append(p);
+    });
+    page.append(layer);
+  }
+
+  function open(id) {
+    close();
+    const file = FILES[id];
+    current = id;
+    // Drive keeps other hidden layers around: the viewer's position among
+    // the body's children (its XPath) is different every time.
+    const extra = Math.floor(Math.random() * 4);
+    for (let i = 0; i < extra; i++) { const d = el('div', g(5)); d.hidden = true; document.body.append(d); }
+
+    overlay = el('div', C.wrap, 'position: fixed; inset: 0; background: rgba(32,33,36,.85); z-index: 10;');
+    const s1 = el('span', g(5)); const s2 = el('span'); const d0 = el('div');
+    const header = el('div', g(5), 'position: absolute; left: 0; right: 0; top: 0; height: 36px; color: #fff; padding: 8px 16px; box-sizing: border-box;');
+    header.textContent = file.title;
+    const dialog = el('div', C.dialog, 'position: absolute; inset: 36px 0 0 0;');
+    dialog.setAttribute('role', 'dialog');
+    dialog.setAttribute('aria-label', 'Showing viewer.');
+    const sh = el('div', C.sh, 'position: absolute; inset: 0;');
+    const main = el('div', C.main, 'position: absolute; inset: 0;');
+    main.setAttribute('role', 'main');
+    const xa = el('div', C.xa, 'position: absolute; inset: 0;');
+    const scroller = el('div', C.scroller, 'position: absolute; inset: 0; overflow: auto;');
+    const doc = el('div', C.doc, 'position: relative; outline: none;');
+    doc.setAttribute('role', 'document');
+    doc.tabIndex = 0;
+    const toolbar = el('div', C.toolbar, 'position: sticky; top: 0; z-index: 1; background: #333; color: #fff; padding: 4px 8px;');
+    toolbar.setAttribute('role', 'toolbar');
+    toolbar.textContent = 'Page 1 / 3 · 100%';
+    doc.append(toolbar);
+    const pages = file.pages.map((_, i) => {
+      const page = el('div', C.page + ' vw-page');
+      if (i === 0) { const img = el('img'); img.alt = ''; img.src = BLANK; page.append(img); }
+      doc.append(page);
+      return page;
+    });
+    scroller.append(doc);
+    xa.append(scroller); main.append(xa); sh.append(main); dialog.append(sh);
+    d0.append(header, dialog); s2.append(d0); s1.append(s2); overlay.append(s1);
+    document.body.append(overlay);
+
+    const p1 = Number(new URLSearchParams(location.search).get('p1delay') ?? 300);
+    timers.push(setTimeout(() => renderText(pages[0], file.pages[0]), p1));
+    const later = () => pages.slice(1).forEach((p, i) => renderText(p, file.pages[i + 1]));
+    timers.push(setTimeout(later, p1 + 300));
+    scroller.addEventListener('scroll', () => {
+      later();
+      const n = 1 + Math.min(2, Math.floor(scroller.scrollTop / 796));
+      toolbar.textContent = `Page ${n} / 3 · 100%`;
+    });
+  }
+
+  function close() {
+    timers.forEach(clearTimeout);
+    timers = [];
+    overlay?.remove();
+    overlay = null;
+    current = null;
+  }
+
+  const lineEl = (page, n) => document.querySelectorAll('[role="document"] > div')[page]?.querySelectorAll('p')[n - 1] ?? null;
+  /** Structural selector for a line (no ids or data-* exist inside the viewer). */
+  function selectorOf(p) {
+    const page = p.closest('[role="document"] > div');
+    const pageIdx = Array.from(page.parentElement.children).filter((c) => c.tagName === 'DIV').indexOf(page) + 1;
+    const lineIdx = Array.from(p.parentElement.children).indexOf(p) + 1;
+    return `[role="document"] > div:nth-of-type(${pageIdx}) > div > p:nth-of-type(${lineIdx})`;
+  }
+
+  document.getElementById('open-a').addEventListener('click', () => open('A'));
+  document.getElementById('open-b').addEventListener('click', () => open('B'));
+  window.__drive = {
+    open,
+    close,
+    get current() { return current; },
+    line: (page, n) => lineEl(page, n),
+    ssnSelector: () => { const ps = Array.from(document.querySelectorAll('[role="document"] p')); const p = ps.find((x) => x.textContent.startsWith('SSN')); return p ? selectorOf(p) : null; },
+    lineSelector: (page, n) => { const p = lineEl(page, n); return p ? selectorOf(p) : null; },
+  };
+})();
+</script>
+</body>
+</html>

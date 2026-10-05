@@ -1,8 +1,9 @@
 import type { Confidence, Fingerprint } from '@/shared/types';
 import { TEST_ID_ATTRS, evalXPath, isIdentifierLike, queryAll, stableClasses, testId } from './selector';
-import { elementsNearLabel, labelInfo, normalizeContext, tableContext } from './context';
+import { elementsNearLabel, headingContext, labelInfo, normalizeContext, tableContext } from './context';
 import { center, distance, isRendered, toViewRect, viewToDoc } from './geometry';
 import { KEY_ATTR_SELECTOR, attrHmacOf, fingerprintText, keyAttrOf, textHmacOf } from './fingerprint';
+import { normalizeText } from '@/shared/hmac';
 
 export interface Resolution {
   el: Element;
@@ -25,6 +26,11 @@ export interface ResolveOptions {
    * or the current anchor would lose its text match to an unmasked twin.
    */
   textOf?: (el: Element) => string | undefined;
+  /**
+   * The in-page viewer the sticker belongs to (content/state/view.ts): only
+   * elements inside it are candidates.
+   */
+  within?: Element;
 }
 
 /**
@@ -47,8 +53,15 @@ const W = {
   classes: 10,
   attr: 2,
   geometry: 8,
+  /** Inside the sticker's own in-page viewer (`within`); identity matches only. */
+  view: 15,
+  /** Same nearest heading; identity matches only. */
+  heading: 5,
   hidden: -10,
 } as const;
+
+/** Elements the text-identity sweep looks at, at most. */
+const TEXT_SWEEP_CAP = 2000;
 
 /**
  * Positional signals (cssPath, xpath, table column, geometry) describe a SLOT,
@@ -189,8 +202,27 @@ export async function resolveFingerprint(fp: Fingerprint, opts: ResolveOptions =
     }
   }
 
+  // Text identity as a candidate source. Positional selectors fail where the
+  // page regenerates class names and moves its layers around (an in-page
+  // viewer re-opened after a deployment), and the text HMAC is then the only
+  // strong identity left; without this nothing would put the element in the
+  // running at all. Bounded: same tag, same normalised length, capped count,
+  // and only when no candidate so far has the right length.
+  if (fp.textHmac && fp.textLen > 0) {
+    const sameLen = (e: Element) => normalizeText(opts.textOf?.(e) ?? fingerprintText(e)).length === fp.textLen;
+    const have = Array.from(candidates).some((e) => e.tagName.toLowerCase() === fp.tag && sameLen(e));
+    if (!have) {
+      const root: ParentNode = opts.within ?? document;
+      const pool = Array.from(root.querySelectorAll(fp.tag)).slice(0, TEXT_SWEEP_CAP);
+      const hits = await Promise.all(
+        pool.map(async (e) => (!exclude(e) && sameLen(e) && (await textHmacOf(opts.textOf?.(e) ?? fingerprintText(e))) === fp.textHmac ? e : null)),
+      );
+      for (const e of hits) if (e) candidates.add(e);
+    }
+  }
+
   const list = Array.from(candidates).filter(
-    (el) => el.isConnected && el.tagName.toLowerCase() === fp.tag && !exclude(el),
+    (el) => el.isConnected && el.tagName.toLowerCase() === fp.tag && !exclude(el) && (!opts.within || opts.within.contains(el)),
   );
   if (list.length === 0) return null;
 
@@ -268,6 +300,16 @@ export async function resolveFingerprint(fp: Fingerprint, opts: ResolveOptions =
     ] as const) {
       const v = el.getAttribute(attr);
       if (fp[k] && v && (normalizeContext(v) === fp[k] || v.slice(0, 60) === fp[k])) s += W.attr;
+    }
+
+    // Context that only corroborates: the same heading, and being inside the
+    // sticker's own viewer. Neither says which record an element is (every row
+    // under a heading shares it), so both count only once something about the
+    // element itself matched. On a percentage-positioned text layer the text
+    // HMAC plus the viewer is as strong as identity gets.
+    if (identityMatched) {
+      if (fp.headingContext && headingContext(el) === fp.headingContext) s += W.heading;
+      if (opts.within) s += W.view;
     }
 
     if (isRendered(el)) {

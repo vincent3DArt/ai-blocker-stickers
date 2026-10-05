@@ -129,6 +129,16 @@ export interface StickerScope {
    */
   pathHmac?: string;
   includeQuery?: boolean;
+  /**
+   * In-page viewer identity (content/state/view.ts). Set when the sticker was
+   * placed inside an overlay viewer (a Drive file preview) whose URL is the
+   * page behind it: HMAC (per-install key) of the first `viewLen` characters
+   * of the viewer's document text, whitespace removed. The sticker is active
+   * only while a viewer whose text hashes the same is open. Never the text.
+   */
+  viewHmac?: string;
+  /** Characters hashed into `viewHmac` (at most VIEW_TEXT_MAX). */
+  viewLen?: number;
 }
 
 export interface StickerFrame {
@@ -319,6 +329,11 @@ export interface TabState {
    * see it, and only Draw rectangle helps.
    */
   rendering: RenderingMode;
+  /**
+   * Stickers that apply to this URL but belong to an in-page viewer that is
+   * not open (another document's preview, or none). Not tracked or drawn.
+   */
+  otherViews?: number;
 }
 
 export type RenderingMode = 'dom' | 'canvas' | 'mixed';

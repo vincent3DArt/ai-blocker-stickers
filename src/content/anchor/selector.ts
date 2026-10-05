@@ -28,9 +28,22 @@ export function isStableId(id: string): boolean {
   return !UNSTABLE_ID.some((re) => re.test(id));
 }
 
+/**
+ * Minified / Closure-compiled class names (Google Drive's `a-b-Xa-La-mf-Ic`,
+ * `tORug`): letter soup that is regenerated with every deployment. Two shapes:
+ * three or more dash groups of one or two letters each, or a short group with
+ * a lowercase-to-uppercase hump and two or more capitals (`tORug`, `SmKAyb`).
+ * Ordinary names (`btn-primary`, `col-ssn`, `narrow`, `navBar`) pass.
+ */
+export function isObfuscatedClass(cls: string): boolean {
+  const groups = cls.split('-');
+  if (groups.length >= 3 && groups.every((g) => /^[A-Za-z]{1,2}$/.test(g))) return true;
+  return groups.some((g) => g.length >= 4 && g.length <= 7 && /[a-z][A-Z]/.test(g) && (g.match(/[A-Z]/g) ?? []).length >= 2);
+}
+
 export function isStableClass(cls: string): boolean {
   if (cls.length < 2 || cls.length > 40) return false;
-  return !UNSTABLE_CLASS.some((re) => re.test(cls));
+  return !UNSTABLE_CLASS.some((re) => re.test(cls)) && !isObfuscatedClass(cls);
 }
 
 export function stableClasses(el: Element, max = 5): string[] {
@@ -132,6 +145,9 @@ export function buildCssPath(el: Element, maxSegments = 8): string {
     const id = node.id;
     const tid = testId(node);
     if (node !== el && ((isStableId(id) && isIdentifierLike(id)) || isIdentifierLike(tid))) break;
+    // A document viewer's `[role=document]` is a stable root inside overlays
+    // whose ancestry (and class names) change from one opening to the next.
+    if (node !== el && node.getAttribute('role') === 'document') break;
     if (node.tagName === 'BODY') break;
     node = node.parentElement;
   }
@@ -147,6 +163,11 @@ export function buildCssPath(el: Element, maxSegments = 8): string {
     }
     if (i === 0 && tid && isIdentifierLike(tid.value)) {
       segments.push(`${n.tagName.toLowerCase()}[${tid.attr}="${cssEscape(tid.value)}"]`);
+      continue;
+    }
+
+    if (i === 0 && n !== el && n.getAttribute('role') === 'document') {
+      segments.push(`${n.tagName.toLowerCase()}[role="document"]`);
       continue;
     }
 

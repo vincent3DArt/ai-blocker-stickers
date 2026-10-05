@@ -27,6 +27,8 @@ createServer(async (req, res) => {
     if (pathname.endsWith('/')) pathname += 'index.html';
     // SPA fixture: any /app/* route serves spa.html
     if (pathname.startsWith('/app/')) pathname = '/spa.html';
+    // Drive-home-like page whose in-page viewer never changes the URL
+    if (pathname === '/drive-home') pathname = '/drive-viewer.html';
     // Drive-like fixture: /drive/file/d/<id>/view (and /preview) serve drive.html
     if (/^\/drive\/file\/d\/[^/]+\/(view|preview)$/.test(pathname)) pathname = '/drive.html';
     const file = normalize(join(root, pathname));

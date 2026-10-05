@@ -25,6 +25,7 @@ import { anchorRect, projectRect } from '../anchor/rect-anchor';
 import { clientRects, clipChain, clipTo, docToView, isRendered, toViewRect, union, area } from '../anchor/geometry';
 import type { SiteStore } from './store';
 import { pageLoc, pagePath } from './page-path';
+import { presentViews, viewIdentityOf, viewKey, type ViewOptions } from './view';
 
 interface Runtime {
   sticker: Sticker;
@@ -46,6 +47,8 @@ interface Runtime {
   ties: Element[];
   /** Resolve again even though attached: the lock came on over a low-confidence match. */
   recheck: boolean;
+  /** Last time a lost sticker was given another resolve attempt. */
+  lostTriedAt: number;
 }
 
 export interface SessionOptions {
@@ -75,6 +78,17 @@ const DETACH_GRACE_MS = 5_000;
 /** How often the visibility-independent masking retry runs, and for how long. */
 const MASK_RETRY_MS = 500;
 const MASK_RETRY_WINDOW_MS = 30_000;
+/** A lost sticker is re-resolved at most this often (content can come back: lazy pages, viewers). */
+const LOST_RETRY_MS = 2_000;
+
+/** The view stickers among `stickers`, as a comparable key (ids and lengths). */
+function viewLens(stickers: Sticker[]): string {
+  return stickers
+    .filter((s) => s.scope.viewHmac)
+    .map((s) => `${s.id}:${s.scope.viewLen ?? 0}`)
+    .sort()
+    .join(',');
+}
 
 export class Session {
   private runtimes = new Map<string, Runtime>();
@@ -92,6 +106,15 @@ export class Session {
   private hmacs: PathHmacs = {};
   private hmacsKey = '';
   private loadGen = 0;
+  /**
+   * In-page viewers (content/state/view.ts) open right now, by view key. A
+   * sticker with a view identity is tracked only while its key is here.
+   */
+  private viewRoots = new Map<string, Element>();
+  /** Stickers that apply to this URL but whose viewer is not open. */
+  private otherViews = 0;
+  private viewsBusy = false;
+  private viewsAgain = false;
 
   private disposers: Array<() => void> = [];
 
@@ -280,11 +303,12 @@ export class Session {
     // (cached), before anything is resolved. A newer load supersedes this one.
     const hmacs = await this.currentHmacs();
     if (gen !== this.loadGen) return;
+    const urlActive = this.o.store.active(pagePath(), this.o.frameDepth, hmacs);
+    const views = await this.scanViews(urlActive);
+    if (gen !== this.loadGen) return;
     this.loadedAt = Date.now();
-    const active = this.o.store.active(pagePath(), this.o.frameDepth, hmacs);
-    const activeIds = new Set(active.map((s) => s.id));
-    for (const id of Array.from(this.runtimes.keys())) if (!activeIds.has(id)) this.drop(id);
-    for (const s of active) if (!this.runtimes.has(s.id)) this.track(s);
+    this.viewRoots = views;
+    this.applyActive(urlActive);
     // Deliberately not awaited: at document_start the resolver keeps being
     // re-armed by the parser's mutation batches, and boot must not wait for
     // that to settle before it can answer messages.
@@ -293,6 +317,106 @@ export class Session {
     this.armMaskRetry();
     this.o.positioner.flush();
     this.reportState();
+  }
+
+  /**
+   * Track exactly the stickers in `urlActive` that are not tied to a viewer,
+   * or whose viewer is open; drop the rest. Returns true when anything changed.
+   */
+  private applyActive(urlActive: Sticker[]): boolean {
+    const active = urlActive.filter((s) => !s.scope.viewHmac || this.viewRoots.has(viewKey(s.scope)));
+    this.otherViews = urlActive.length - active.length;
+    const activeIds = new Set(active.map((s) => s.id));
+    let changed = false;
+    for (const id of Array.from(this.runtimes.keys())) {
+      if (!activeIds.has(id)) {
+        this.drop(id);
+        changed = true;
+      }
+    }
+    for (const s of active) {
+      if (!this.runtimes.has(s.id)) {
+        this.track(s);
+        changed = true;
+      }
+    }
+    return changed;
+  }
+
+  private viewOptions(): ViewOptions {
+    return { isOurs: (n) => this.o.isOurs(n), originalOf: (t) => this.o.masker.originalText(t) };
+  }
+
+  /** Viewers open now, hashed at the lengths the URL's view stickers need. */
+  private scanViews(urlActive: Sticker[]): Promise<Map<string, Element>> {
+    const lens = urlActive.filter((s) => s.scope.viewHmac).map((s) => s.scope.viewLen ?? 0);
+    if (!lens.length) return Promise.resolve(new Map());
+    return presentViews(lens, this.viewOptions());
+  }
+
+  /**
+   * An in-page viewer opens and closes without a navigation, so the set of
+   * open viewers is re-read on every (debounced) mutation batch. Costs nothing
+   * on pages with no viewer sticker for this URL.
+   */
+  private async refreshViews() {
+    if (this.viewsBusy) {
+      this.viewsAgain = true;
+      return;
+    }
+    this.viewsBusy = true;
+    try {
+      do {
+        this.viewsAgain = false;
+        const l = pageLoc();
+        // The URL changed and load() has not caught up yet: it will do this.
+        if (l.origin + l.pathname + l.search !== this.hmacsKey) return;
+        const gen = this.loadGen;
+        const urlActive = this.o.store.active(pagePath(), this.o.frameDepth, this.hmacs);
+        if (!this.viewRoots.size && !urlActive.some((s) => s.scope.viewHmac)) {
+          this.otherViews = 0;
+          return;
+        }
+        const views = await this.scanViews(urlActive);
+        if (gen !== this.loadGen) return;
+        // A sticker added (or removed) during the scan: its viewer may not
+        // have been hashed at the right length. Scan again rather than drop it.
+        const fresh = this.o.store.active(pagePath(), this.o.frameDepth, this.hmacs);
+        if (viewLens(fresh) !== viewLens(urlActive)) {
+          this.viewsAgain = true;
+          continue;
+        }
+        this.viewRoots = views;
+        const before = this.otherViews;
+        if (this.applyActive(fresh) || before !== this.otherViews) {
+          this.o.positioner.flush();
+          this.reportState();
+        }
+      } while (this.viewsAgain);
+    } finally {
+      this.viewsBusy = false;
+    }
+  }
+
+  /** The open viewer a sticker belongs to, if it has a view identity. */
+  private viewRootOf(s: Sticker): Element | undefined {
+    if (!s.scope.viewHmac) return undefined;
+    const r = this.viewRoots.get(viewKey(s.scope));
+    return r?.isConnected ? r : undefined;
+  }
+
+  /**
+   * `scope` plus the view identity of the viewer `el` sits in, if any. The
+   * viewer is registered as open right away, so the new sticker is not
+   * dropped before the next scan sees it.
+   */
+  private async withView(scope: Sticker['scope'], el: Element | null): Promise<Sticker['scope']> {
+    if (!el) return scope;
+    const v = await viewIdentityOf(el, this.viewOptions());
+    if (!v) return scope;
+    const out = { ...scope, viewHmac: v.viewHmac, viewLen: v.viewLen };
+    this.viewRoots.set(viewKey(out), v.root);
+    return out;
   }
 
   /** Path changed inside an SPA. */
@@ -310,6 +434,7 @@ export class Session {
    * rect moved; both are checked in `maskUnderRect`.
    */
   async onMutationBatch() {
+    await this.refreshViews();
     await this.resolveAll();
     // Masking runs here, on a setTimeout-driven batch, rather than waiting for
     // the frame `resolveAll` asks for: batches still fire in a hidden tab.
@@ -396,6 +521,7 @@ export class Session {
       saveError: this.o.store.saveError,
       strictInputs: this.o.masker.strictCount(),
       autoCount: this.o.store.ephemeralIds.length,
+      otherViews: this.otherViews,
     };
   }
 
@@ -410,7 +536,8 @@ export class Session {
     const now = Date.now();
     const premasked = opts.id ? this.o.masker.rootOf(opts.id) : undefined;
     if (premasked?.isConnected) el = premasked;
-    const [anchor, scope, frame] = await Promise.all([buildFingerprint(el), defaultScope(pageLoc()), this.frameInfo()]);
+    const [anchor, urlScope, frame] = await Promise.all([buildFingerprint(el), defaultScope(pageLoc()), this.frameInfo()]);
+    const scope = await this.withView(urlScope, el);
     const moved = opts.id ? this.o.masker.rootOf(opts.id) : undefined;
     if (moved?.isConnected && moved !== el) el = moved;
     const sticker: ElementSticker = {
@@ -439,7 +566,9 @@ export class Session {
     const single = this.singleElementUnder(rect);
     if (single) return this.addElementSticker(single, 'rect');
     const now = Date.now();
-    const [a, scope, frame] = await Promise.all([anchorRect(rect, (e) => this.o.isOurs(e)), defaultScope(pageLoc()), this.frameInfo()]);
+    const under = document.elementsFromPoint(rect.x + rect.w / 2, rect.y + rect.h / 2).find((e) => !this.o.isOurs(e)) ?? null;
+    const [a, urlScope, frame] = await Promise.all([anchorRect(rect, (e) => this.o.isOurs(e)), defaultScope(pageLoc()), this.frameInfo()]);
+    const scope = await this.withView(urlScope, under);
     const sticker: RectSticker = {
       kind: 'rect',
       id: crypto.randomUUID(),
@@ -457,7 +586,11 @@ export class Session {
     };
     this.o.store.upsert(sticker);
     const rt = this.track(sticker);
-    const container = await resolveFingerprint(a.container, { exclude: (e) => this.o.isOurs(e), ...(this.locked ? LOCKED_RESOLVE : {}) });
+    const container = await resolveFingerprint(a.container, {
+      exclude: (e) => this.o.isOurs(e),
+      within: this.viewRootOf(sticker),
+      ...(this.locked ? LOCKED_RESOLVE : {}),
+    });
     this.attach(rt, container?.el ?? document.body, 'high');
     this.o.positioner.flush();
     this.reportState();
@@ -498,9 +631,12 @@ export class Session {
     const rt = this.runtimes.get(id);
     if (!rt) return;
     if (kind !== 'exact' && typeof rawPattern !== 'string') return;
-    const scope = await makeScope(kind === 'exact' ? 'exact' : 'pattern', pageLoc(), rawPattern);
+    const urlScope = await makeScope(kind === 'exact' ? 'exact' : 'pattern', pageLoc(), rawPattern);
     const cur = this.runtimes.get(id);
     if (!cur) return;
+    // The URL part changes; the viewer the sticker lives in does not.
+    const { viewHmac, viewLen } = cur.sticker.scope;
+    const scope = viewHmac ? { ...urlScope, viewHmac, viewLen } : urlScope;
     const updated = { ...cur.sticker, scope, updatedAt: Date.now() } as Sticker;
     cur.sticker = updated;
     cur.view.setSticker(updated);
@@ -686,6 +822,7 @@ export class Session {
       lastRect: null,
       ties: [],
       recheck: false,
+      lostTriedAt: 0,
     };
     this.runtimes.set(sticker.id, rt);
     return rt;
@@ -800,15 +937,21 @@ export class Session {
         passes++;
         for (const rt of this.runtimes.values()) {
           if (rt.status === 'resolved' && rt.el?.isConnected && !rt.recheck) continue;
-          // A lost sticker never masks, and edit mode (its only way back) is
-          // refused while locked; the lower locked threshold may still find it.
-          if (rt.status === 'lost' && !this.editing && !this.locked) continue;
+          // A lost sticker is retried, but sparingly: its content can come back
+          // (a lazily rendered page scrolled back into view). Edit mode and
+          // the lock (lower threshold) retry it on every pass.
+          if (rt.status === 'lost' && !this.editing && !this.locked) {
+            const now = Date.now();
+            if (now - rt.lostTriedAt < LOST_RETRY_MS) continue;
+            rt.lostTriedAt = now;
+          }
           rt.recheck = false;
           const fp = rt.sticker.kind === 'element' ? rt.sticker.anchor : rt.sticker.container;
           const locked = this.locked;
           const res = await resolveFingerprint(fp, {
             exclude: (e) => this.o.isOurs(e) || this.anchoredByOther(e, rt),
             textOf: (e) => this.maskedText(rt, e),
+            within: this.viewRootOf(rt.sticker),
             ...(locked ? LOCKED_RESOLVE : {}),
           });
           if (res) {

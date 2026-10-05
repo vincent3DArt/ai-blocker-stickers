@@ -35,6 +35,15 @@ export async function pathHmacOf(value: string, kind: 'path' | 'frame' = 'path')
   return hmacHex(hmacKey, kind + '\u0000' + value);
 }
 
+/**
+ * HMAC of an in-page viewer's normalised document text (content/state/view.ts).
+ * Domain-separated from text, attribute and path HMACs.
+ */
+export async function viewHmacOf(text: string): Promise<string | undefined> {
+  if (!hmacKey) return undefined;
+  return hmacHex(hmacKey, 'view\u0000' + text);
+}
+
 /** An attribute stored raw when identifier-like, as an HMAC otherwise. */
 async function rawOrHmac(value: string | null | undefined): Promise<{ raw?: string; hmac?: string }> {
   if (!value) return {};
