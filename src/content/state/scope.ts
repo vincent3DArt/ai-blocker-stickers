@@ -1,6 +1,6 @@
 import type { ScopeKind, StickerFrame, StickerScope } from '@/shared/types';
 import { defaultScopeKind, normalizePath, sanitizePathPattern, searchHasDocId, type PathHmacs } from '@/shared/url-match';
-import { pathHmacOf } from '../anchor/fingerprint';
+import { pathHmacOf, pathHmacSync } from '../anchor/fingerprint';
 
 /** The parts of `Location` scoping needs (tests pass plain objects). */
 export interface Loc {
@@ -30,6 +30,16 @@ export async function pathHmacs(loc: Loc, frameDepth: number): Promise<PathHmacs
     frameDepth > 0 ? pathHmacOf(loc.origin + path, 'frame') : Promise.resolve(undefined),
   ]);
   return { path: p, pathQuery: pq, frame: f };
+}
+
+/** `pathHmacs`, synchronously (boot fast path); empty without the raw key. */
+export function pathHmacsSync(loc: Loc, frameDepth: number): PathHmacs {
+  const path = normalizePath(loc.pathname);
+  return {
+    path: pathHmacSync(path),
+    pathQuery: pathHmacSync(path + '?' + canonicalSearch(loc.search)),
+    frame: frameDepth > 0 ? pathHmacSync(loc.origin + path, 'frame') : undefined,
+  };
 }
 
 /**

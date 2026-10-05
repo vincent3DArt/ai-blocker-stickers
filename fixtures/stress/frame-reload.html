@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Reloading frame</title><style>body { font-family: system-ui, sans-serif; margin: 8px; }</style></head>
+<body>
+<div id="root"></div>
+<script>
+  // Reloads itself every 2 s, like a dashboard widget polling by navigation.
+  const render = () => { document.getElementById('root').innerHTML = '<p>Widget: balance due</p><p class="ident">Taxpayer SSN 123-45-6789 (primary)</p>'; };
+  window.__rerender = render;
+  render();
+  setTimeout(() => location.reload(), 2000);
+</script>
+</body>
+</html>

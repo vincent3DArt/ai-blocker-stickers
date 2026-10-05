@@ -1,0 +1,12 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Leaf frame</title><style>body { font-family: system-ui, sans-serif; margin: 8px; }</style></head>
+<body>
+<div id="root"></div>
+<script>
+  const render = () => { document.getElementById('root').innerHTML = '<p>Spouse record</p><p class="ident">Spouse SSN 987-65-4321 (secondary)</p>'; };
+  window.__rerender = render;
+  render();
+</script>
+</body>
+</html>

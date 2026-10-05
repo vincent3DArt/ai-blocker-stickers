@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Stress: print media</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 0; display: flex; }
+  nav { width: 220px; background: #eef; padding: 16px; min-height: 600px; }
+  main { padding: 16px; width: 560px; }
+  @media print {
+    nav { display: none; }
+    body { display: block; font: 13pt Georgia, serif; }
+    main { width: auto; padding: 32px; }
+    .screen-only { display: none; }
+  }
+</style>
+</head>
+<body>
+<nav><p>Navigation</p><p>Clients</p><p>Reports</p></nav>
+<main>
+  <h1>Client summary</h1>
+  <p class="screen-only">Use the browser's print command for a paper copy.</p>
+  <p class="ident">Taxpayer SSN 123-45-6789 (primary)</p>
+  <p>Prepared by the office.</p>
+</main>
+<script src="/stress/common.js"></script>
+<script>
+  const SECRET = '123-45-6789';
+  const { frames, targetFor } = window.__stress;
+  window.__fx = {
+    actions: ['spec:print', 'rerender', 'spec:screen', 'spec:print', 'spec:screen'],
+    async run(name) {
+      if (name === 'rerender') {
+        const p = document.querySelector('p.ident');
+        const n = document.createElement('p');
+        n.className = 'ident';
+        n.textContent = 'Taxpayer SSN ' + SECRET + ' (primary)';
+        p.replaceWith(n);
+      }
+      await frames();
+    },
+    target: () => targetFor(document.querySelector('p.ident')),
+    secrets: () => [SECRET],
+    cover: { selector: 'p.ident' },
+  };
+</script>
+</body>
+</html>

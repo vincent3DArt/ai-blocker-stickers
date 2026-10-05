@@ -25,6 +25,8 @@ createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
     let pathname = decodeURIComponent(url.pathname);
     if (pathname.endsWith('/')) pathname += 'index.html';
+    // Stress SPA router: client routes and the settings route share one page.
+    if (/^\/stress\/(clients\/\d+|settings)$/.test(pathname)) pathname = '/stress/spa-router.html';
     // SPA fixture: any /app/* route serves spa.html
     if (pathname.startsWith('/app/')) pathname = '/spa.html';
     // Drive-home-like page whose in-page viewer never changes the URL
@@ -36,6 +38,9 @@ createServer(async (req, res) => {
     const s = await stat(file);
     if (!s.isFile()) throw new Error('not a file');
     const body = await readFile(file);
+    // `?delay=<ms>`: a slow response (late images in the stress fixtures).
+    const delay = Number(url.searchParams.get('delay') ?? 0);
+    if (delay > 0) await new Promise((r) => setTimeout(r, Math.min(delay, 10_000)));
     res.writeHead(200, {
       'content-type': types[extname(file)] ?? 'application/octet-stream',
       'cache-control': 'no-store',

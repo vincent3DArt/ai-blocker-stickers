@@ -72,6 +72,12 @@ export interface Fingerprint {
   cssPath: string;
   /** Positional XPath from the document root. */
   xpath: string;
+  /**
+   * For an element inside shadow trees: the CSS path of each shadow host,
+   * outermost first, each relative to the tree that holds it. `cssPath` is
+   * then relative to the innermost shadow root.
+   */
+  hostPath?: string[];
   /** Nearest label text: lowercased, digits stripped, <= 40 chars. */
   labelContext?: string;
   /**
@@ -105,8 +111,10 @@ export type MaskMode = 'text' | 'input' | 'visual-only';
  * How a sticker was placed. `suggest`: the user covered an auto-suggest
  * suggestion. `session-auto`: covered automatically while the tab was locked;
  * kept in memory only, unless the user keeps it when the AI session ends.
+ * `backstop`: covered automatically, in memory only, while another sticker
+ * on the page is lost (a moved copy of its text or of its kind of number).
  */
-export type StickerSource = 'manual' | 'selection' | 'context-menu' | 'rect' | 'suggest' | 'session-auto';
+export type StickerSource = 'manual' | 'selection' | 'context-menu' | 'rect' | 'suggest' | 'session-auto' | 'backstop';
 
 /**
  * `pattern`: `pathPattern` is matched as a glob (record ids generalised).
@@ -165,6 +173,11 @@ export interface StickerBase {
   scope: StickerScope;
   frame: StickerFrame;
   source: StickerSource;
+  /**
+   * The high-strength pattern the covered text matched at creation, if any.
+   * Only the detector's name is stored, never the text.
+   */
+  detector?: BackstopDetector;
   /** Extra pixels around the anchor box. */
   padding: number;
   createdAt: number;
@@ -204,7 +217,47 @@ export interface RectSticker extends StickerBase {
   /** Absolute size at draw time, used when the container's aspect ratio drifts. */
   px: { w: number; h: number };
   maskUnderlyingText: boolean;
+  /**
+   * The text the rectangle covered at creation (content/anchor/text-anchor.ts).
+   * Absent when it covered no text (an image, a canvas) and on stickers stored
+   * before this existed: those follow the container fractions only.
+   */
+  text?: RectText;
+  /**
+   * The deepest element holding all the covered text, when that is not the
+   * container itself (a labelled `<span>` inside a paragraph). Resolved when
+   * the container cannot be: its label can name the field when the
+   * container's own text has changed (the same view showing another record).
+   */
+  inner?: Fingerprint;
 }
+
+/**
+ * Text anchor of a rect sticker. Only HMACs and layout numbers: the covered
+ * characters are found again by hashing candidate windows of `len`.
+ */
+export interface RectText {
+  /** HMAC (per-install key) of the covered characters, whitespace removed. Never the text. */
+  coverHmac: string;
+  /** Number of covered characters, whitespace removed. */
+  len: number;
+  /** HMAC of every covered token (lowercased), for the lost-sticker backstop. */
+  tokenHmacs: string[];
+  /**
+   * Pixels between the covered text's box and the drawn rectangle, at line
+   * height `lh`. The sticker is drawn around wherever the text is now, grown
+   * by these margins (scaled by the current line height over `lh`).
+   */
+  margin: { l: number; t: number; r: number; b: number };
+  lh: number;
+}
+
+/**
+ * The high-strength detector the covered text matched at creation
+ * (content/detect/patterns.ts). Lets a lost sticker's pattern backstop cover
+ * a moved copy of the same kind of number. Never the text.
+ */
+export type BackstopDetector = 'ssn' | 'itin' | 'card' | 'iban' | 'maskedLast4';
 
 export type Sticker = ElementSticker | RectSticker;
 

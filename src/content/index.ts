@@ -4,11 +4,13 @@ import { isToContent, type GetStickersResponse, type GetSuggestionsResponse, typ
 import { SESSION_ACTIVE_KEY, computeLock, lockMessage, type LockState } from '@/shared/lock';
 import { loadOrCreateSecret, loadSettings } from '@/shared/storage';
 import { importKey } from '@/shared/hmac';
+import { b64Bytes } from '@/shared/hmac-sync';
 import { mountHost } from './overlay/host';
 import { Positioner } from './overlay/positioner';
 import { Picker } from './overlay/picker';
 import { RectDraw } from './overlay/rect-draw';
 import { Toolbar, type ToolbarAction } from './overlay/toolbar';
+import { Banner } from './overlay/banner';
 import { Peek, type PeekTarget } from './overlay/peek';
 import { MutationHub } from './mask/guard';
 import { Masker } from './mask/masker';
@@ -143,13 +145,28 @@ export async function boot(opts: BootOptions = {}): Promise<BootApi | undefined>
     chrome.storage.local.get(SESSION_ACTIVE_KEY).catch(() => ({}) as Record<string, unknown>),
     // Folded to the empty object in production: the keys never reach the bundle.
     import.meta.env.DEV
-      ? chrome.storage.local.get(['aibsNoAutoLock', 'aibsNoScan']).catch(() => ({}) as Record<string, unknown>)
+      ? chrome.storage.local.get(['aibsNoAutoLock', 'aibsNoScan', 'aibsFailNextSave']).catch(() => ({}) as Record<string, unknown>)
       : Promise.resolve({} as Record<string, unknown>),
   ]);
   const devNoAutoLock = import.meta.env.DEV && devLocal.aibsNoAutoLock === true;
   const devNoScan = import.meta.env.DEV && devLocal.aibsNoScan === true;
+  if (import.meta.env.DEV && devLocal.aibsFailNextSave === true) {
+    // Dev only: the next chrome.storage.local.set from this frame rejects
+    // once, so the e2e suite can watch a failed save surface and retry.
+    const area = chrome.storage.local;
+    const realSet = area.set.bind(area);
+    let armed = true;
+    void realSet({ aibsFailNextSave: false });
+    (area as { set: typeof area.set }).set = ((items: Record<string, unknown>) => {
+      if (armed && Object.keys(items).some((k) => k.startsWith('site:'))) {
+        armed = false;
+        return Promise.reject(new Error('simulated storage failure (dev)'));
+      }
+      return realSet(items);
+    }) as typeof area.set;
+  }
   let settings: Settings = settingsLoaded;
-  setFingerprintKey(await importKey(secret));
+  setFingerprintKey(await importKey(secret), b64Bytes(secret));
 
   const host = mountHost();
   host.setColor(settings.appearance.color);
@@ -167,7 +184,18 @@ export async function boot(opts: BootOptions = {}): Promise<BootApi | undefined>
     if (partial.autoCount !== undefined) partial = { ...partial, autoCount: partial.autoCount + (scanner?.autoMaskOnly ?? 0) };
     tabState = { ...tabState, ...partial };
     if (depth === 0) chrome.runtime.sendMessage({ type: 'TAB_STATUS', state: tabState }).catch(() => {});
+    updateBanner();
+    for (const h of sendStateHooks) h();
   };
+  const sendStateHooks: Array<() => void> = [];
+  // Lost stickers and failed saves are never silent: a banner in the overlay.
+  let sessionReady = false;
+  const banner = new Banner(host, { onReattach: () => startPick(session.bannerState().firstLost ?? null) });
+  function updateBanner() {
+    if (!sessionReady) return;
+    const b = session.bannerState();
+    banner.set({ lost: session.isPaused ? 0 : b.lost, reattached: b.reattached, backstop: b.backstop, saveError: store.saveError });
+  }
 
   const spa = new SpaNav();
   let peek: Peek | undefined;
@@ -237,6 +265,23 @@ export async function boot(opts: BootOptions = {}): Promise<BootApi | undefined>
     onState: sendState,
     onGhostClick: (s) => startPick(s.id),
   });
+  sessionReady = true;
+  // Pre-paint fast path: a detached or drifted anchor's content is matched
+  // in the same mutation callback that inserted it (after the masker's own).
+  hub.addListener((records) => session.onRecords(records));
+  // Boot fast path: mask what is already in the DOM before anything async.
+  session.preMask();
+  // The boot cloak (public/cloak.css) comes off once nothing it protects is
+  // still unplaced, and after a second whatever happens.
+  let cloaked = true;
+  const liftCloak = (force = false) => {
+    if (!cloaked || (!force && session.cloakHolds())) return;
+    cloaked = false;
+    host.markReady();
+  };
+  liftCloak();
+  if (cloaked) setTimeout(() => liftCloak(true), 1000);
+  sendStateHooks.push(() => liftCloak());
 
   // ---- AI-session lock: signals ----
   // The background knows about attached debuggers and the manual session; the
@@ -584,7 +629,8 @@ export async function boot(opts: BootOptions = {}): Promise<BootApi | undefined>
           sendResponse({ ok: true });
           return true;
         case 'TEST_COVER': {
-          const scope = m.shadowHost ? document.querySelector(m.shadowHost)?.shadowRoot : document;
+          let scope: Document | ShadowRoot | null | undefined = document;
+          for (const h of m.shadowPath ?? (m.shadowHost ? [m.shadowHost] : [])) scope = scope?.querySelector(h)?.shadowRoot;
           const el = scope?.querySelector(m.selector);
           if (!el) {
             sendResponse({ ok: false, error: 'no element' });
@@ -619,6 +665,9 @@ export async function boot(opts: BootOptions = {}): Promise<BootApi | undefined>
           });
           sendResponse({
             stickers: session.summaries(),
+            banner: banner.text,
+            bannerButtons: banner.buttons(),
+            bannerShown: banner.shown.slice(),
             state: { ...tabState, ...session.state() },
             pieces,
             lock: { ...lock, signals: { debugger: bgLock.debugger, manual: bgLock.manual, localSession, webdriver: webdriver() } },

@@ -45,6 +45,9 @@ async function registerScript(id: string, matches: string[]): Promise<void> {
     id,
     matches,
     js: [CONTENT_SCRIPT],
+    // The boot cloak (public/cloak.css): applied before the first parse, lifted
+    // by the content script once the stickers are in place.
+    css: ['cloak.css'],
     runAt: 'document_start',
     allFrames: true,
     persistAcrossSessions: true,

@@ -108,9 +108,17 @@ const LEAK_PATTERNS = [/\b\d{3}[- ]\d{2}[- ]\d{4}\b/, /\b\d{2}-\d{7}\b/, /\b\d{9
  * timestamp, a length or a layout coordinate (an epoch in milliseconds is 13
  * digits, and matching it here used to abort every single save).
  */
-const HMAC_KEYS = new Set(['textHmac', 'keyHmac', 'idHmac', 'testIdHmac', 'nameHmac', 'dismissedSuggestions', 'pathHmac', 'urlHmac', 'viewHmac']);
+const HMAC_KEYS = new Set(['textHmac', 'keyHmac', 'idHmac', 'testIdHmac', 'nameHmac', 'dismissedSuggestions', 'pathHmac', 'urlHmac', 'viewHmac', 'coverHmac', 'tokenHmacs']);
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+const HEX64 = /^[0-9a-f]{64}$/;
+/** An HMAC, or a list of HMACs. Anything else under an HMAC key is scanned like any other value. */
+function isHmacValue(v: unknown): boolean {
+  if (typeof v === 'string') return HEX64.test(v);
+  if (Array.isArray(v)) return v.every((x) => typeof x === 'string' && HEX64.test(x));
+  return v === undefined || v === null;
+}
 
 export function assertNoCoveredText(rec: SiteRecord): void {
   const visit = (value: unknown, path: string): void => {
@@ -133,7 +141,7 @@ export function assertNoCoveredText(rec: SiteRecord): void {
     if (value && typeof value === 'object') {
       for (const [k, v] of Object.entries(value)) {
         // Only a real HMAC (64 hex) is exempt; anything else under an HMAC key is scanned.
-        if (HMAC_KEYS.has(k) && !(typeof v === 'string' && !/^[0-9a-f]{64}$/.test(v))) continue;
+        if (HMAC_KEYS.has(k) && isHmacValue(v)) continue;
         visit(v, path ? `${path}.${k}` : k);
       }
     }

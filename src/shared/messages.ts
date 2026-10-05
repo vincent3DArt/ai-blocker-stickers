@@ -60,7 +60,7 @@ export type ToContent =
   | { type: 'REVIEW_SUGGESTIONS' }
   | { type: 'DISMISS_SUGGESTION'; id: string }
   // Development builds only: drive placement from tests.
-  | { type: 'TEST_COVER'; selector: string; shadowHost?: string }
+  | { type: 'TEST_COVER'; selector: string; shadowHost?: string; shadowPath?: string[] }
   | { type: 'TEST_RECT'; rect: { x: number; y: number; w: number; h: number } }
   | { type: 'TEST_STATE' }
   | { type: 'TEST_COVER_SUGGESTIONS' }

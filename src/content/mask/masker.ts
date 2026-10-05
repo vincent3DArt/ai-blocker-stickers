@@ -276,7 +276,10 @@ export class Masker {
   has(id: string): boolean {
     const rec = this.records.get(id);
     if (!rec) return false;
-    return rec.subset ? rec.splits.length > 0 : true;
+    // A split whose nodes all left the document (an outer component replaced
+    // the shadow tree they lived in, which no removal walk can see into)
+    // masks nothing any more.
+    return rec.subset ? rec.splits.some((sp) => sp.parts.some((p) => p.isConnected)) : true;
   }
 
   /** Mask a whole element. */
@@ -363,6 +366,23 @@ export class Masker {
         after: after.length,
       });
     }
+  }
+
+  /**
+   * Viewport rects of the characters a rect (subset) record masked, wherever
+   * the page has moved them since. Empty for whole-element records.
+   */
+  subsetRects(id: string): Array<{ x: number; y: number; w: number; h: number }> {
+    const rec = this.records.get(id);
+    if (!rec || !rec.subset) return [];
+    const out: Array<{ x: number; y: number; w: number; h: number }> = [];
+    for (const t of rec.texts.keys()) {
+      if (!t.isConnected) continue;
+      const range = t.ownerDocument.createRange();
+      range.selectNodeContents(t);
+      for (const r of Array.from(range.getClientRects())) if (r.width > 0 && r.height > 0) out.push({ x: r.left, y: r.top, w: r.width, h: r.height });
+    }
+    return out;
   }
 
   /** True when the page rewrote a split node and the rect must be rescanned. */
@@ -470,8 +490,15 @@ export class Masker {
 
   /** Masked content inside a shadow tree needs that tree observed too. */
   private watchRoot(n: Node) {
-    const r = n.getRootNode();
-    if (r !== n && r.nodeType === Node.DOCUMENT_FRAGMENT_NODE) this.hub.observe(r);
+    // Every shadow root up the chain: a re-render of an outer component
+    // replaces the inner one, and only the outer tree reports it.
+    let r = n.getRootNode();
+    while (r !== n && r.nodeType === Node.DOCUMENT_FRAGMENT_NODE) {
+      this.hub.observe(r);
+      const host = (r as ShadowRoot).host;
+      if (!host) break;
+      r = host.getRootNode();
+    }
   }
 
   private newRecord(id: string, root: Element, mode: MaskMode, subset: boolean): MaskRecord {

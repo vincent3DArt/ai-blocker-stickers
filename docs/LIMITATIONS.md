@@ -113,8 +113,12 @@ close them by breaking the page.
    records, the value changed, or two identical copies appeared.
 10. **Shadow DOM.** Open shadow roots are masked and watched. Closed shadow
     roots are entered only on custom elements (through `chrome.dom`). An
-    element sticker inside a shadow root follows in-place re-renders but
-    cannot be re-found by selector after a reload.
+    element sticker inside a shadow root stores the CSS path of every host
+    above it and is resolved inside the innermost root, so it follows
+    re-renders and reloads. Each host is found by the first match of its
+    path: two identical hosts side by side are not told apart. A rectangle
+    drawn over shadow content anchors to the outermost host (the browser's
+    hit test does not enter shadow roots) and finds its text by HMAC.
 11. **Frames.** Same-origin frames run their own copy of the content script.
     Cross-origin frames need their origin enabled separately.
 
@@ -256,3 +260,66 @@ the popup lists it only under "N stickers for other views".
     of selectors. Inside a viewer an anchor is found again by its
     `[role=document]`-rooted structural path and by its text HMAC; two lines
     with identical text in the same document tie.
+
+## When a sticker cannot find its content
+
+A lost sticker never masks anything by itself, so it fails closed in other
+ways: a banner at the top of the viewport (closed shadow root, `aria-hidden`)
+names it and offers Re-attach, the badge shows `!`, and three backstops look
+for the content elsewhere (README, "What happens when a sticker can't find its
+content"). `tests/e2e/stress.spec.ts` and `tests/e2e/failclosed.spec.ts`
+exercise them.
+
+30. **The banner is per frame.** A lost sticker inside an iframe raises the
+    banner in that frame's own overlay, at the top of the frame, and only the
+    top frame drives the toolbar badge. In a small frame the banner can be
+    partly out of view.
+31. **Backstops are bounded.** The text-HMAC backstop looks at the first
+    5,000 elements of the document (or of the sticker's shadow root or
+    viewer) and only at elements whose text has the stored length; the
+    token and pattern backstops walk at most 20,000 text nodes and create at
+    most 20 covers per lost sticker. They run when the sticker turns lost and
+    then every 2 seconds while it stays lost. Between turning lost (5 s after
+    the content went away) and the first backstop pass, a moved copy of the
+    text is readable.
+32. **The token backstop skips short words.** A rectangle's covered words
+    are matched only when they contain a digit or are at least six
+    characters long; "SSN" or "the" would match everywhere. A covered
+    two-letter code that moved is not found again.
+33. **The pattern backstop needs context.** It covers matches of the same
+    detector (SSN, ITIN, card, IBAN, masked last four) near the stored label
+    or heading. A number that moved under a different heading and label is
+    not covered (unless the original stored neither, in which case every
+    match of that detector on the page is). Covers are session-only and go
+    away when the sticker is found again or the page reloads.
+34. **Fast path is element stickers only.** A detached or drifted element
+    sticker is matched against inserted nodes inside the mutation callback,
+    by text HMAC (record key and id too, where stored), before paint. A rect
+    sticker whose container is recycled or replaced is re-resolved on the
+    next 50 ms mutation batch; the moved text is readable for that window
+    (see 9).
+35. **Text anchoring needs the characters.** A rectangle is drawn around its
+    masked characters wherever they move. If the page rewrites those
+    characters (a different value in the same field) the HMAC no longer
+    matches anywhere, and the rectangle falls back to masking whatever the
+    projected rectangle covers. Search for the stored characters is capped
+    at 20,000 characters of container text.
+36. **A rectangle over a form field masks the whole field.** The field's
+    value is not DOM text, so it is masked in input mode (discs, out of the
+    accessibility tree), including the parts of it outside the rectangle.
+37. **Saves are retried, not queued across reloads.** A rejected storage
+    write is retried with backoff (1 s doubling to 30 s) while the page is
+    open, and once more on `pagehide`. A sticker placed while storage keeps
+    failing is lost when the tab closes.
+38. **The boot cloak hides pixels, layout text and the AX tree, not the
+    DOM.** On origins with stickers the browser injects `cloak.css` at
+    `document_start`: the page is `visibility: hidden` until the content
+    script has loaded its stickers and placed the ones it can place
+    synchronously (element stickers by text HMAC; others hold the cloak up
+    to 1 second). `tests/e2e/boot-gap.spec.ts` polls `innerText` every 10 ms
+    after a reload and finds the secret readable for 0 ms (before the cloak:
+    60 to 200 ms on the fixtures). During that window `textContent`,
+    `outerHTML` and the network response still hold the raw text (see 4),
+    and a page element styled `visibility: visible` shows through. Every
+    page of such an origin is painted that much later. If the content
+    script never starts, the cloak lifts itself after 1.5 seconds.

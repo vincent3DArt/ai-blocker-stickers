@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<title>Stress: RTL, zoom, vertical text</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 0; padding: 16px; zoom: 1.25; }
+  .vertical { writing-mode: vertical-rl; height: 300px; border: 1px solid #aaa; padding: 8px; }
+  .horizontal { writing-mode: horizontal-tb; }
+  p { margin: 4px; }
+</style>
+</head>
+<body>
+<h1>ملف العميل</h1>
+<p>Right-to-left page with a zoomed body.</p>
+<section id="sec" class="vertical">
+  <p>Client: Jane Example</p>
+  <p class="ident">Taxpayer SSN 123-45-6789 (primary)</p>
+  <p>Filed on paper</p>
+</section>
+<script src="/stress/common.js"></script>
+<script>
+  const SECRET = '123-45-6789';
+  const sec = document.getElementById('sec');
+  const { frames, targetFor } = window.__stress;
+  window.__fx = {
+    actions: ['zoom-2', 'spec:vp:700x500', 'horizontal', 'vertical', 'zoom-back', 'spec:vp:1000x700', 'spec:reload'],
+    async run(name) {
+      switch (name) {
+        case 'zoom-2': document.body.style.zoom = '2'; break;
+        case 'zoom-back': document.body.style.zoom = ''; break;
+        case 'horizontal': sec.className = 'horizontal'; break;
+        case 'vertical': sec.className = 'vertical'; break;
+      }
+      await frames();
+    },
+    target: () => targetFor(document.querySelector('p.ident')),
+    secrets: () => [SECRET],
+    cover: { selector: 'p.ident' },
+  };
+</script>
+</body>
+</html>

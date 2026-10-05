@@ -34,11 +34,50 @@ enters the lost state. A lost sticker draws a hatched amber ghost at the remembe
 never masks anything. It will not cover the wrong content to stay useful. Click the ghost to
 re-attach it with the element picker.
 
-Free-drawn rectangles work the same way. At draw time the extension finds the deepest element that
-fully contains the rectangle and stores the rectangle as fractions of that element's box, plus the
-absolute pixel size and a full fingerprint of the container. Each frame the container is resolved
-and the fractions are re-applied. If the container's aspect ratio changes sharply, the sticker falls
-back to its pixel size so it does not stretch into nonsense.
+Free-drawn rectangles work the same way. At draw time the extension finds the nearest block that
+contains the rectangle and stores the rectangle as fractions of that element's box, plus the
+absolute pixel size and a full fingerprint of the container. If the rectangle covers text, the text
+itself becomes the anchor: the covered characters are stored as an HMAC (and each covered word as
+its own HMAC), and the sticker is drawn around wherever those characters are now. A late web font,
+a zoom, or a re-wrapped line therefore moves the sticker with the text instead of leaving it over
+the old coordinates. After a reload the fractions give a first guess, and if the characters under it
+do not hash right, the container is searched for the window that does. Form fields under a
+rectangle are masked whole. A rectangle over no text follows the container fractions; if the
+container's aspect ratio changes sharply, it falls back to its pixel size.
+
+A sticker whose node starts showing a different record (a virtualised list recycling its rows, a
+reused component showing the next client) notices that the record key or text HMAC no longer match.
+It keeps masking the node and follows its own record to whichever node shows it now, in the same
+mutation callback that rendered it, before the page can paint it.
+
+## What happens when a sticker can't find its content
+
+It fails closed and says so. While any sticker on the page is lost, a banner at the top of the
+viewport says "1 sticker couldn't find its content on this page. Click to re-attach." with a
+**Re-attach** button that starts the element picker and a **Dismiss for this page** link that lasts
+only until the page reloads. The badge shows `!`. The banner lives in the extension's closed shadow
+root and is `aria-hidden`, so page readers never see it. Before settling for the banner the
+extension looks for the content elsewhere:
+
+- an element anywhere on the page, of any tag, whose text HMAC equals the sticker's is re-attached
+  automatically, flagged low confidence, and reported in the banner as "re-attached automatically";
+- for a rectangle, any text whose words hash like the words it covered is covered by a new
+  session-only sticker;
+- if the covered text was an SSN, ITIN, card number, IBAN or masked last four (only the detector's
+  name is stored), every match of that pattern near the same label or heading is covered by a
+  session-only sticker for as long as the original stays lost, and the banner says so.
+
+A lost sticker never masks anything by itself. If a save to extension storage fails, the banner
+says "Could not save stickers on this site" and the save is retried with backoff until it lands;
+the stickers stay on the page meanwhile. A sticker placed just before the page goes away is
+already stored: the store writes on the next tick and again on `pagehide`.
+
+At page load the extension cannot read its stickers before the page starts parsing, so on origins
+with stickers the browser applies a small stylesheet at `document_start` that keeps the page
+`visibility: hidden` until the stickers are in place (usually well under 100 ms, at most one
+second; it lifts itself after 1.5 seconds if the extension never starts). Element stickers are
+matched by text HMAC in the same mutation callback that inserts their content, so the secret is
+masked before the page can paint or read it.
 
 ## Install (developer)
 
@@ -235,8 +274,9 @@ only in content-script memory, in the isolated world, where page scripts cannot 
    secrets in the URL or tab title, downloads, Chrome's PDF viewer, and `chrome://` pages are out of
    any extension's reach. Open a PDF in the extension's own viewer to sticker it (see [PDFs](#pdfs));
    the original file is still on the server or the disk, and an agent can fetch that.
-5. Anchoring is heuristic. Virtualised lists that recycle rows can attach to the wrong row. The
-   confidence flag and the lost state make that visible.
+5. Anchoring is heuristic. A recycled row is followed by its record key and text HMAC, but a
+   record with neither (no key attribute, text shared with another row) can still attach to the
+   wrong row. The confidence flag, the lost state and the banner make that visible.
 6. Cross-origin iframes need their own origin enabled. Modal dialogs make the host inert; it renders
    fine, but hover-peek is disabled until the dialog closes.
 7. Canvas apps (Google Docs, Sheets and Slides, Figma, Excalidraw, Miro, Lucid, PDF viewers, WebGL
@@ -303,6 +343,15 @@ buttons reproduce each row of the design's layout matrix: insert content above, 
 swap fonts, toggle a responsive breakpoint, move a cell into a modal, re-render with new class
 hashes, and delete a row. After each change the test asserts that the sticker still covers the
 target and nothing else.
+
+`tests/e2e/stress.spec.ts` runs the same assertions, plus "no secret in any frame's `innerText` or
+`ariaSnapshot`" and "a screenshot pixel at the target is sticker-coloured", over the pages in
+`fixtures/stress/`: a virtualised list with recycled rows, tabs and an accordion, web components two
+shadow roots deep, reloading and nested iframes, RTL with CSS zoom and vertical text, late fonts and
+images, an SPA router reusing one component, a rich-text editor and a textarea, print media, and a
+page script that strips foreign elements, attributes and styles. Each page gets an element and a
+rectangle sticker. `tests/e2e/failclosed.spec.ts` covers the banner, the backstops and save
+failures; `tests/e2e/boot-gap.spec.ts` measures how long a secret stays readable after it appears.
 
 **Test data.** Every SSN, EIN, and account number in `fixtures/` is invented. None of them is a real
 identifier. `pnpm scan` checks the rest of the repository for real-looking numbers, keys, and email

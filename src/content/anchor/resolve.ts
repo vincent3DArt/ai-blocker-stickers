@@ -4,6 +4,28 @@ import { elementsNearLabel, headingContext, labelInfo, normalizeContext, tableCo
 import { center, distance, isRendered, toViewRect, viewToDoc } from './geometry';
 import { KEY_ATTR_SELECTOR, attrHmacOf, fingerprintText, keyAttrOf, textHmacOf } from './fingerprint';
 import { normalizeText } from '@/shared/hmac';
+import { shadowRootOf } from '../mask/text-mask';
+
+/**
+ * The tree a fingerprint is resolved in: the document, or the shadow root at
+ * the end of `hostPath` (each host found by its CSS path in the tree above).
+ * Null when a host on the way is missing.
+ */
+export function scopeRootOf(fp: Fingerprint): Document | ShadowRoot | null {
+  let root: Document | ShadowRoot = document;
+  for (const sel of fp.hostPath ?? []) {
+    let host: Element | null = null;
+    try {
+      host = root.querySelector(sel);
+    } catch {
+      return null;
+    }
+    const sr: ShadowRoot | null = host ? shadowRootOf(host) : null;
+    if (!sr) return null;
+    root = sr;
+  }
+  return root;
+}
 
 export interface Resolution {
   el: Element;
@@ -120,20 +142,23 @@ export async function resolveFingerprint(fp: Fingerprint, opts: ResolveOptions =
   const margin = opts.margin ?? 10;
   const exclude = opts.exclude ?? (() => false);
 
+  const root = scopeRootOf(fp);
+  if (!root) return null;
+  const inShadow = root !== document;
   const candidates = new Set<Element>();
   if (fp.id) {
-    const byId = document.getElementById(fp.id);
+    const byId = root.getElementById(fp.id);
     if (byId) candidates.add(byId);
   }
   if (fp.testId) {
     for (const a of ['data-testid', 'data-test', 'data-cy', 'data-qa']) {
-      queryAll(`[${a}="${CSS.escape(fp.testId)}"]`).forEach((e) => candidates.add(e));
+      queryAll(`[${a}="${CSS.escape(fp.testId)}"]`, root).forEach((e) => candidates.add(e));
     }
   }
-  queryAll(fp.cssPath).forEach((e) => candidates.add(e));
-  evalXPath(fp.xpath).forEach((e) => candidates.add(e));
-  if (fp.name) queryAll(`${fp.tag}[name="${CSS.escape(fp.name)}"]`).forEach((e) => candidates.add(e));
-  if (fp.labelContext) elementsNearLabel(fp.labelContext, fp.tag).forEach((e) => candidates.add(e));
+  queryAll(fp.cssPath, root).forEach((e) => candidates.add(e));
+  if (!inShadow) evalXPath(fp.xpath).forEach((e) => candidates.add(e));
+  if (fp.name) queryAll(`${fp.tag}[name="${CSS.escape(fp.name)}"]`, root).forEach((e) => candidates.add(e));
+  if (fp.labelContext && !inShadow) elementsNearLabel(fp.labelContext, fp.tag).forEach((e) => candidates.add(e));
 
   // Exact-match attributes stored as HMACs (values that were not
   // identifier-like). Memoised per raw value for this pass; only values that
@@ -149,7 +174,7 @@ export async function resolveFingerprint(fp: Fingerprint, opts: ResolveOptions =
     return p;
   };
   const addByHmac = async (selector: string, want: string, read: (e: Element) => string | null | undefined) => {
-    const els = queryAll(selector).slice(0, 1000);
+    const els = queryAll(selector, root).slice(0, 1000);
     await Promise.all(
       els.map(async (e) => {
         if ((await attrHmac(read(e))) === want) candidates.add(e);
@@ -175,7 +200,7 @@ export async function resolveFingerprint(fp: Fingerprint, opts: ResolveOptions =
 
   // Records whose key still matches, wherever the framework re-rendered them to.
   if (fp.keyHmac) {
-    const holders = queryAll(KEY_ATTR_SELECTOR).slice(0, 200);
+    const holders = queryAll(KEY_ATTR_SELECTOR, root).slice(0, 200);
     await Promise.all(
       holders.map(async (h) => {
         if (exclude(h)) return;
@@ -188,7 +213,7 @@ export async function resolveFingerprint(fp: Fingerprint, opts: ResolveOptions =
 
   // Same tag inside the same table column, for reordered / re-rendered tables.
   if (fp.tableContext?.header) {
-    for (const th of queryAll('th')) {
+    for (const th of queryAll('th', root)) {
       const t = th.textContent?.toLowerCase().replace(/[^\p{L}\s]/gu, ' ').replace(/\s+/g, ' ').trim();
       if (t !== fp.tableContext.header) continue;
       const row = th.closest('tr');
@@ -212,8 +237,8 @@ export async function resolveFingerprint(fp: Fingerprint, opts: ResolveOptions =
     const sameLen = (e: Element) => normalizeText(opts.textOf?.(e) ?? fingerprintText(e)).length === fp.textLen;
     const have = Array.from(candidates).some((e) => e.tagName.toLowerCase() === fp.tag && sameLen(e));
     if (!have) {
-      const root: ParentNode = opts.within ?? document;
-      const pool = Array.from(root.querySelectorAll(fp.tag)).slice(0, TEXT_SWEEP_CAP);
+      const sweepRoot: ParentNode = opts.within ?? root;
+      const pool = Array.from(sweepRoot.querySelectorAll(fp.tag)).slice(0, TEXT_SWEEP_CAP);
       const hits = await Promise.all(
         pool.map(async (e) => (!exclude(e) && sameLen(e) && (await textHmacOf(opts.textOf?.(e) ?? fingerprintText(e))) === fp.textHmac ? e : null)),
       );
@@ -226,8 +251,8 @@ export async function resolveFingerprint(fp: Fingerprint, opts: ResolveOptions =
   );
   if (list.length === 0) return null;
 
-  const cssExact = new Set(queryAll(fp.cssPath));
-  const xpathExact = new Set(evalXPath(fp.xpath));
+  const cssExact = new Set(queryAll(fp.cssPath, root));
+  const xpathExact = new Set(inShadow ? [] : evalXPath(fp.xpath));
   const storedCenter = center(fp.rect);
   const scaleX = fp.viewportW > 0 ? window.innerWidth / fp.viewportW : 1;
 

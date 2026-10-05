@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Stress: virtualised list</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 0; padding: 16px; }
+  #list { height: 560px; overflow: auto; position: relative; border: 1px solid #999; width: 720px; }
+  #spacer { position: relative; }
+  #list > #spacer > div { position: absolute; left: 0; right: 0; height: 28px; display: flex; gap: 12px; align-items: center; padding: 0 8px; border-bottom: 1px solid #eee; box-sizing: border-box; }
+  #list span:nth-child(1) { width: 140px; }
+  #list span:nth-child(2) { width: 120px; color: #555; }
+</style>
+</head>
+<body>
+<h1>Clients (virtualised)</h1>
+<div id="list"><div id="spacer"></div></div>
+<script src="/stress/common.js"></script>
+<script>
+  // react-window style: a fixed pool of row nodes, recycled by slot as the
+  // list scrolls; keys in data-key; class names regenerated on every render.
+  const ROW_H = 28;
+  const POOL = 24;
+  const SECRET = '123-45-6789';
+  const all = [];
+  for (let i = 0; i < 500; i++) {
+    const n = String(i).padStart(3, '0');
+    all.push({ key: 'r' + i, name: 'Person ' + n, acct: 'Acct ' + n, note: 'Note for person ' + n + ' ok' });
+  }
+  all[3] = { key: 'r3', name: 'Aaron Target', acct: 'Acct 003', note: 'Taxpayer SSN ' + SECRET + ' (primary)' };
+  let rows = all.slice();
+  let filter = null;
+  const list = document.getElementById('list');
+  const spacer = document.getElementById('spacer');
+  const pool = [];
+  for (let i = 0; i < POOL; i++) {
+    const d = document.createElement('div');
+    d.append(document.createElement('span'), document.createElement('span'), document.createElement('span'));
+    pool.push(d);
+  }
+  const hash = () => Math.random().toString(36).slice(2, 8);
+
+  function render() {
+    const view = filter ? rows.filter(filter) : rows;
+    spacer.style.height = view.length * ROW_H + 'px';
+    const first = Math.max(0, Math.floor(list.scrollTop / ROW_H) - 2);
+    const h = hash();
+    const used = new Set();
+    for (let i = first; i < Math.min(view.length, first + POOL); i++) {
+      const slot = i % POOL;
+      const node = pool[slot];
+      used.add(slot);
+      const r = view[i];
+      node.className = 'row-' + h + ' sc-' + h + slot;
+      node.dataset.key = r.key;
+      node.style.transform = 'translateY(' + i * ROW_H + 'px)';
+      const [a, b, c] = node.children;
+      a.className = 'cell-' + h;
+      b.className = 'cell-' + h;
+      c.className = 'cell-' + h;
+      if (a.textContent !== r.name) a.textContent = r.name;
+      if (b.textContent !== r.acct) b.textContent = r.acct;
+      if (c.textContent !== r.note) c.textContent = r.note;
+      if (!node.isConnected) spacer.appendChild(node);
+    }
+    pool.forEach((n, slot) => { if (!used.has(slot) && n.isConnected) n.remove(); });
+  }
+  list.addEventListener('scroll', () => requestAnimationFrame(render));
+
+  const { wait, frames, targetFor } = window.__stress;
+  const scrollTo = async (y) => { list.scrollTop = y; render(); await frames(); await wait(150); };
+  window.__fx = {
+    actions: ['scroll-away-back', 'rehash', 'insert-above', 'sort', 'filter-out-in', 'spec:reload'],
+    async run(name) {
+      switch (name) {
+        case 'scroll-away-back': await scrollTo(6000); await wait(300); await scrollTo(0); break;
+        case 'rehash': render(); break;
+        case 'insert-above':
+          for (let i = 0; i < 4; i++) rows.unshift({ key: 'n' + Date.now() + i, name: 'Zed New ' + i, acct: 'Acct N' + i, note: 'Inserted note ' + i + ' ok' });
+          render();
+          break;
+        case 'sort': rows.sort((x, y) => x.name.localeCompare(y.name)); render(); break;
+        case 'filter-out-in':
+          filter = (r) => r.key !== 'r3'; render(); await frames(); await wait(400);
+          filter = null; render();
+          break;
+      }
+      await frames();
+    },
+    target() {
+      const row = spacer.querySelector('[data-key="r3"]');
+      return targetFor(row && row.children[2]);
+    },
+    secrets: () => [SECRET],
+    cover: { selector: '#spacer > [data-key="r3"] > span:nth-child(3)' },
+  };
+  render();
+</script>
+</body>
+</html>

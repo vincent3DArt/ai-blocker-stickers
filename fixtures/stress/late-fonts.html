@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Stress: late fonts and images</title>
+<style>
+  body { font-family: Arial, sans-serif; font-size: 15px; margin: 0; padding: 16px; }
+  body.late { font-family: LateFace, serif; font-size: 18px; }
+  body.late2 { font-family: LateMono, monospace; font-size: 16px; }
+  main { width: 620px; }
+</style>
+</head>
+<body>
+<header id="banner"><img src="/stress/tall.svg?delay=1200" alt=""></header>
+<main>
+  <h1>Client letter</h1>
+  <p>Dear client, this paragraph is long enough to wrap across a few lines so that a font swap moves the words around.</p>
+  <p class="ident">Taxpayer SSN 123-45-6789 (primary) is the number we have on file for you and your household.</p>
+  <p>Regards, the office.</p>
+</main>
+<script src="/stress/common.js"></script>
+<script>
+  // A web font that arrives 1.5 s after first paint (font-display: swap),
+  // and images without dimensions that load late.
+  const SECRET = '123-45-6789';
+  const { wait, frames, targetFor } = window.__stress;
+  async function lateFont(family, src, cls, delay) {
+    await wait(delay);
+    try {
+      const f = new FontFace(family, src);
+      document.fonts.add(f);
+      await f.load();
+    } catch {}
+    document.body.classList.remove('late', 'late2');
+    document.body.classList.add(cls);
+  }
+  addEventListener('load', () => lateFont('LateFace', 'local("Georgia"), local("Times New Roman")', 'late', 1500));
+  window.__fx = {
+    actions: ['settle', 'late-image', 'font-swap-again', 'spec:reload', 'settle'],
+    async run(name) {
+      switch (name) {
+        case 'settle': await wait(2600); break;
+        case 'late-image': {
+          const img = new Image();
+          const done = new Promise((r) => { img.onload = r; img.onerror = r; });
+          img.src = '/stress/tall.svg?delay=700&n=' + Date.now();
+          document.querySelector('main').insertBefore(img, document.querySelector('main h1'));
+          await done;
+          break;
+        }
+        case 'font-swap-again': await lateFont('LateMono', 'local("Courier New"), local("Consolas")', 'late2', 300); break;
+      }
+      await frames();
+    },
+    target: () => targetFor(document.querySelector('p.ident')),
+    secrets: () => [SECRET],
+    cover: { selector: 'p.ident' },
+  };
+</script>
+</body>
+</html>

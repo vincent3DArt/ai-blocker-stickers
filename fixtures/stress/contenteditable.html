@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Stress: rich text editor</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 0; padding: 16px; }
+  #editor { border: 1px solid #999; padding: 8px; width: 620px; min-height: 80px; }
+  #editor p { margin: 4px 0; }
+  textarea { width: 620px; height: 60px; font: inherit; display: block; margin-top: 12px; }
+</style>
+</head>
+<body>
+<h1>Notes</h1>
+<div id="editor" contenteditable="true"></div>
+<textarea id="notes">Spouse SSN 987-65-4321 (secondary)</textarea>
+<script src="/stress/common.js"></script>
+<script>
+  // Quill-like: the editor keeps a model and re-renders the DOM from it on
+  // every keystroke. The textarea is re-rendered by a framework setting
+  // .value, and remounted with a fresh element.
+  // Variant `?v=textarea` targets the textarea.
+  const textarea = new URLSearchParams(location.search).get('v') === 'textarea';
+  const SECRET = textarea ? '987-65-4321' : '123-45-6789';
+  const editor = document.getElementById('editor');
+  let model = ['Client: Jane Example', 'Taxpayer SSN 123-45-6789 (primary)'];
+  const esc = (s) => s.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[c]);
+  function renderEditor() { editor.innerHTML = model.map((l, i) => `<p data-line="${i}">${esc(l)}</p>`).join(''); }
+  editor.addEventListener('input', () => { model = Array.from(editor.querySelectorAll('p')).map((p) => p.textContent); renderEditor(); });
+  const { frames, targetFor, boxOf, frameOffset } = window.__stress;
+  window.__fx = {
+    actions: textarea ? ['textarea-set-value', 'textarea-remount', 'spec:reload'] : ['keystroke-elsewhere', 'remote-edit', 'spec:reload'],
+    async run(name) {
+      switch (name) {
+        case 'keystroke-elsewhere': model[0] = model[0] + '.'; renderEditor(); break;
+        case 'remote-edit': model.unshift('Shared by a collaborator'); renderEditor(); break;
+        case 'textarea-set-value': { const t = document.getElementById('notes'); t.value = t.value; break; }
+        case 'textarea-remount': {
+          const t = document.getElementById('notes');
+          const n = document.createElement('textarea');
+          n.id = 'notes';
+          n.textContent = 'Spouse SSN 987-65-4321 (secondary)';
+          t.replaceWith(n);
+          break;
+        }
+      }
+      await frames();
+    },
+    async target() {
+      if (!textarea) return targetFor(editor.querySelector('p[data-line="' + model.findIndex((l) => l.startsWith('Taxpayer')) + '"]'));
+      const t = document.getElementById('notes');
+      const b = boxOf(t);
+      // The value is not DOM text: the secret is the first line of the field.
+      return b && { el: b, secret: { x: b.x + 2, y: b.y + 2, w: Math.min(b.w - 4, 300), h: 20 }, offset: frameOffset(window) };
+    },
+    secrets: () => [SECRET],
+    cover: { selector: textarea ? '#notes' : '#editor p[data-line="1"]' },
+  };
+  renderEditor();
+</script>
+</body>
+</html>

@@ -45,7 +45,7 @@ export class SiteStore {
     this.record = record ?? { v: 1, origin, enabled: true, stickers: [], updatedAt: 0 };
     chrome.storage.onChanged.addListener(this.onChanged);
     window.addEventListener('pagehide', () => {
-      if (this.saveTimer) void this.flush();
+      if (this.saveTimer || this.retryTimer) void this.flush();
     });
   }
 
@@ -105,16 +105,22 @@ export class SiteStore {
     return this.ephemeral.has(id);
   }
 
+  /** Session-scoped stickers covered automatically while locked (backstop covers are not counted). */
   get ephemeralIds(): string[] {
-    return Array.from(this.ephemeral.keys());
+    return Array.from(this.ephemeral.values())
+      .filter((s) => s.source !== 'backstop')
+      .map((s) => s.id);
   }
 
   /** The user kept the session's auto-covered stickers: they become ordinary stored stickers. */
   keepEphemeral(): string[] {
     const ids = this.ephemeralIds;
     if (!ids.length) return ids;
-    for (const s of this.ephemeral.values()) this.record.stickers.push(s);
-    this.ephemeral.clear();
+    // Backstop covers belong to a lost sticker and stay session-only.
+    for (const id of ids) {
+      this.record.stickers.push(this.ephemeral.get(id)!);
+      this.ephemeral.delete(id);
+    }
     this.scheduleSave();
     return ids;
   }
@@ -165,16 +171,43 @@ export class SiteStore {
     this.ownWrites.add(this.record.updatedAt);
     if (this.ownWrites.size > 50) this.ownWrites.delete(this.ownWrites.values().next().value!);
     let ok: boolean;
+    let writeFailed = false;
     try {
       const { dropped } = await saveSite(this.record);
       ok = dropped.length === 0;
       if (!ok) this.logSaveError(`${dropped.length} sticker(s) could not be stored`);
     } catch (e) {
       ok = false;
+      writeFailed = true;
       this.logSaveError(e);
     }
+    // A rejected write (quota, a storage hiccup) is retried with backoff
+    // until it lands; the record stays in memory and the page stays covered
+    // meanwhile. A sticker the privacy guard refuses is not retried: it
+    // would be refused again.
+    if (writeFailed) this.scheduleRetry();
+    else this.clearRetry();
     this.setSaveError(!ok);
     return ok;
+  }
+
+  private retryTimer = 0;
+  private retryDelay = 0;
+
+  private scheduleRetry() {
+    if (this.retryTimer) clearTimeout(this.retryTimer);
+    this.retryDelay = this.retryDelay ? Math.min(this.retryDelay * 2, 30_000) : 1000;
+    this.retryTimer = window.setTimeout(() => {
+      this.retryTimer = 0;
+      void this.flush();
+    }, this.retryDelay);
+  }
+
+  private clearRetry() {
+    if (this.retryTimer) clearTimeout(this.retryTimer);
+    this.retryTimer = 0;
+    this.retryDelay = 0;
+    this.saveErrorLogged = false;
   }
 
   private logSaveError(e: unknown) {

@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Stress: aggressive page</title>
+<style>body { font-family: system-ui, sans-serif; margin: 0; padding: 16px; } main { width: 640px; }</style>
+</head>
+<body>
+<main>
+  <h1>Client</h1>
+  <p>Some text about the client.</p>
+  <p class="ident">Taxpayer SSN 123-45-6789 (primary)</p>
+  <p>More text.</p>
+</main>
+<script src="/stress/common.js"></script>
+<script>
+  // A page that fights anything it did not create: every 250 ms it removes
+  // unknown elements, strips aria-hidden, resets style attributes and
+  // normalises text nodes; every 3 s it re-renders the body from the markup
+  // it captured at load.
+  const SECRET = '123-45-6789';
+  const MARKUP = document.body.innerHTML;
+  const KNOWN = new Set(['HTML', 'HEAD', 'BODY', 'MAIN', 'H1', 'P', 'SCRIPT', 'STYLE', 'META', 'TITLE', 'LINK']);
+  function scrub() {
+    for (const el of Array.from(document.querySelectorAll('*'))) {
+      if (!KNOWN.has(el.tagName)) { el.remove(); continue; }
+      if (el.hasAttribute('aria-hidden')) el.removeAttribute('aria-hidden');
+      if (el.hasAttribute('style')) el.removeAttribute('style');
+    }
+    document.body.normalize();
+  }
+  setInterval(scrub, 250);
+  const rerender = () => { document.body.innerHTML = MARKUP; };
+  setInterval(rerender, 3000);
+  const { wait, frames, targetFor } = window.__stress;
+  window.__fx = {
+    actions: ['wait-scrub', 'wait-rerender', 'rerender-now', 'wait-rerender', 'spec:reload'],
+    async run(name) {
+      switch (name) {
+        case 'wait-scrub': await wait(800); break;
+        case 'wait-rerender': await wait(3200); break;
+        case 'rerender-now': rerender(); break;
+      }
+      await frames();
+    },
+    target: () => targetFor(document.querySelector('p.ident')),
+    secrets: () => [SECRET],
+    cover: { selector: 'p.ident' },
+  };
+</script>
+</body>
+</html>

@@ -20,6 +20,9 @@ const DENY = [
   'aibsNoAutoLock',
   'emulateHidden',
   'aibsEmulateHidden',
+  'aibsFailNextSave',
+  'bannerButtons',
+  'bannerShown',
   '127.0.0.1:4173',
   'localhost:4173',
 ];

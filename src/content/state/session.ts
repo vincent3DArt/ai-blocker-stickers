@@ -1,5 +1,6 @@
 import type {
   AnchorStatus,
+  RectText,
   Confidence,
   ElementSticker,
   RectSticker,
@@ -11,18 +12,24 @@ import type {
 } from '@/shared/types';
 import type { StickerSummary } from '@/shared/messages';
 import { scopeApplies, type PathHmacs } from '@/shared/url-match';
-import { scopeKindOf, type ScopeKind } from '@/shared/types';
-import { defaultScope, frameDescriptor, makeScope, pathHmacs } from './scope';
+import { scopeKindOf, type BackstopDetector, type ScopeKind } from '@/shared/types';
+import { defaultScope, frameDescriptor, makeScope, pathHmacs, pathHmacsSync } from './scope';
 import type { OverlayHost } from '../overlay/host';
 import { StickerView } from '../overlay/sticker-view';
 import type { Positioner } from '../overlay/positioner';
 import type { Masker } from '../mask/masker';
 import { defaultMaskMode } from '../mask/masker';
-import { coveredTextRanges } from '../mask/text-mask';
-import { buildFingerprint } from '../anchor/fingerprint';
-import { LOCKED_RESOLVE, resolveFingerprint } from '../anchor/resolve';
+import { collectTextNodes, coveredTextRanges, type TextRange } from '../mask/text-mask';
+import { coveredKey, coveredTokens, locateByHash, locateExact, rangesForSpan, startOf, stripped } from '../anchor/text-anchor';
+import { buildFingerprint, coveredHmacSync, fingerprintText, hasSyncKey, keyHmacSync, textHmacSync, tokenHmacSync } from '../anchor/fingerprint';
+import { LOCKED_RESOLVE, resolveFingerprint, scopeRootOf } from '../anchor/resolve';
+import { headingContext, labelInfo, tableContext } from '../anchor/context';
+import { HIGH_IDS, findMatches } from '../detect/patterns';
+import { allBlocks } from '../detect/block-text';
+import { detectBlock, detectInputs, matchRect } from '../detect/scanner';
+import { normalizeText } from '@/shared/hmac';
 import { anchorRect, projectRect } from '../anchor/rect-anchor';
-import { clientRects, clipChain, clipTo, docToView, isRendered, toViewRect, union, area } from '../anchor/geometry';
+import { clientRects, clipChain, clipTo, docToView, intersect, isRendered, toViewRect, union, area } from '../anchor/geometry';
 import type { SiteStore } from './store';
 import { pageLoc, pagePath } from './page-path';
 import { presentViews, viewIdentityOf, viewKey, type ViewOptions } from './view';
@@ -49,6 +56,24 @@ interface Runtime {
   recheck: boolean;
   /** Last time a lost sticker was given another resolve attempt. */
   lostTriedAt: number;
+  /**
+   * Rect stickers: the covered characters (whitespace removed), in memory
+   * only, and where they were last found in the container's text. The mask
+   * follows these characters, not the projected rectangle.
+   */
+  anchorKey?: string;
+  anchorAt: number;
+  /** Rect stickers: the container the current mask was made in. */
+  maskedIn: Element | null;
+  /** Rect stickers: form fields under the rectangle, masked whole (mask id `<id>::field<n>`). */
+  fields: Element[];
+  /** Identity drift (see checkDrift): what the anchor held when last re-checked, and when. */
+  driftSig: string;
+  driftAt: number;
+  /** Re-attached by the text-HMAC backstop (not proven by the resolver): shown in the banner. */
+  auto: boolean;
+  /** Session-only backstop stickers this lost sticker created (ids). */
+  backstops: Set<string>;
 }
 
 export interface SessionOptions {
@@ -80,6 +105,49 @@ const MASK_RETRY_MS = 500;
 const MASK_RETRY_WINDOW_MS = 30_000;
 /** A lost sticker is re-resolved at most this often (content can come back: lazy pages, viewers). */
 const LOST_RETRY_MS = 2_000;
+/** A rect side drawn within this many pixels of its text hugs the text; a looser side keeps its drawn edge. */
+const TIGHT_PX = 8;
+
+/** Form fields a rect sticker masks whole when it covers part of them. */
+const FIELD_SELECTOR = 'input:not([type=hidden]),textarea,select,[contenteditable]:not([contenteditable="false"])';
+
+/** Backstop covers one lost sticker may create, at most. */
+const MAX_BACKSTOPS = 20;
+/** Elements the text-HMAC backstop and the sync fast path look at, at most. */
+const BACKSTOP_SWEEP_CAP = 5000;
+const NO_TEXT_TAGS = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE', 'HEAD', 'TITLE']);
+
+/** The high-strength detector `text` matches, if any (only its name is ever stored). */
+function detectorOf(text: string): BackstopDetector | undefined {
+  if (!text || !/\d/.test(text)) return undefined;
+  return findMatches(text, { ids: HIGH_IDS })[0]?.id as BackstopDetector | undefined;
+}
+
+/** `el` or its nearest ancestor (within six levels) with tag `tag`. */
+function containerAbove(el: Element, tag: string): Element | null {
+  let a: Element | null = el;
+  for (let i = 0; a && i <= 6; i++, a = a.parentElement) if (a.tagName.toLowerCase() === tag) return a;
+  return null;
+}
+
+/** Deepest element holding every range, or null. */
+function commonElement(ranges: TextRange[]): Element | null {
+  let el: Element | null = ranges[0]?.node.parentElement ?? null;
+  while (el && !ranges.every((r) => el!.contains(r.node))) el = el.parentElement;
+  return el;
+}
+
+/** Viewport rects of text ranges. */
+function rangeRects(ranges: TextRange[]): ViewRect[] {
+  const out: ViewRect[] = [];
+  for (const r of ranges) {
+    const range = r.node.ownerDocument.createRange();
+    range.setStart(r.node, r.start);
+    range.setEnd(r.node, r.end);
+    for (const c of Array.from(range.getClientRects())) if (c.width > 0 && c.height > 0) out.push({ x: c.left, y: c.top, w: c.width, h: c.height });
+  }
+  return out;
+}
 
 /** The view stickers among `stickers`, as a comparable key (ids and lengths). */
 function viewLens(stickers: Sticker[]): string {
@@ -106,6 +174,10 @@ export class Session {
   private hmacs: PathHmacs = {};
   private hmacsKey = '';
   private loadGen = 0;
+  /** Last time `recompute` kicked the resolver for a detached sticker. */
+  private kickAt = 0;
+  /** Stickers that apply to this URL, view stickers whose viewer is closed included. */
+  private urlActive: Sticker[] = [];
   /**
    * In-page viewers (content/state/view.ts) open right now, by view key. A
    * sticker with a view identity is tracked only while its key is here.
@@ -246,7 +318,7 @@ export class Session {
     for (const rt of this.runtimes.values()) {
       const s = rt.sticker;
       if (s.kind !== 'rect' || !s.maskUnderlyingText) continue;
-      if (this.o.masker.has(s.id)) continue;
+      if (this.o.masker.has(s.id) || rt.fields.length) continue;
       if (rt.status === 'resolved' && rt.el?.isConnected && !hasText(rt.el, this.o.isOurs)) continue;
       return true;
     }
@@ -296,6 +368,53 @@ export class Session {
     this.maskTimer = 0;
   }
 
+  /**
+   * Boot fast path, synchronous, right after the store and key are loaded:
+   * track every sticker for this URL (view stickers excepted until their
+   * viewer is seen) and attach each element sticker whose text HMAC matches
+   * an element already in the DOM. Content parsed later is caught by
+   * `onRecords` in the mutation callback that inserts it. The async
+   * resolver (`load`) then re-checks every choice.
+   */
+  preMask() {
+    if (!hasSyncKey() || this.paused) return;
+    const loc = pageLoc();
+    const hm = pathHmacsSync(loc, this.o.frameDepth);
+    if (!hm.path) return;
+    this.hmacs = hm;
+    this.hmacsKey = loc.origin + loc.pathname + loc.search;
+    this.urlActive = this.o.store.active(pagePath(), this.o.frameDepth, hm);
+    for (const s of this.urlActive) if (!s.scope.viewHmac && !this.runtimes.has(s.id)) this.track(s);
+    for (const rt of this.runtimes.values()) {
+      const s = rt.sticker;
+      if (s.kind !== 'element' || rt.status === 'resolved' || !s.anchor.textHmac) continue;
+      const root = scopeRootOf(s.anchor);
+      if (!root) continue;
+      for (const c of Array.from(root.querySelectorAll(s.anchor.tag)).slice(0, BACKSTOP_SWEEP_CAP)) {
+        if (this.o.isOurs(c) || this.o.masker.isMaskedNode(c) || this.anchoredByOther(c, rt) || !this.fastMatch(s.anchor, c)) continue;
+        this.attach(rt, c, 'low');
+        rt.recheck = true;
+        break;
+      }
+    }
+    this.o.positioner.markDirty();
+  }
+
+  /**
+   * True while the boot cloak should stay: some sticker for this page is
+   * still looking for its anchor and the mutation fast path cannot cover its
+   * content when it appears (a rectangle, or an element without a text HMAC,
+   * such as an image).
+   */
+  cloakHolds(): boolean {
+    for (const rt of this.runtimes.values()) {
+      if (rt.status !== 'resolving') continue;
+      const s = rt.sticker;
+      if (s.kind === 'rect' || !s.anchor.textHmac) return true;
+    }
+    return false;
+  }
+
   /** Apply every sticker that matches the current path. */
   async load() {
     const gen = ++this.loadGen;
@@ -304,6 +423,7 @@ export class Session {
     const hmacs = await this.currentHmacs();
     if (gen !== this.loadGen) return;
     const urlActive = this.o.store.active(pagePath(), this.o.frameDepth, hmacs);
+    this.urlActive = urlActive;
     const views = await this.scanViews(urlActive);
     if (gen !== this.loadGen) return;
     this.loadedAt = Date.now();
@@ -382,6 +502,7 @@ export class Session {
         // A sticker added (or removed) during the scan: its viewer may not
         // have been hashed at the right length. Scan again rather than drop it.
         const fresh = this.o.store.active(pagePath(), this.o.frameDepth, this.hmacs);
+        this.urlActive = fresh;
         if (viewLens(fresh) !== viewLens(urlActive)) {
           this.viewsAgain = true;
           continue;
@@ -435,6 +556,7 @@ export class Session {
    */
   async onMutationBatch() {
     await this.refreshViews();
+    this.checkDrift();
     await this.resolveAll();
     // Masking runs here, on a setTimeout-driven batch, rather than waiting for
     // the frame `resolveAll` asks for: batches still fire in a hidden tab.
@@ -454,6 +576,9 @@ export class Session {
       if (paused) {
         this.o.masker.restore(rt.sticker.id);
         this.clearTies(rt);
+        this.clearFields(rt);
+        rt.lastRectKey = '';
+        rt.maskedIn = null;
         rt.view.hide();
       } else {
         this.applyMask(rt);
@@ -536,6 +661,7 @@ export class Session {
     const now = Date.now();
     const premasked = opts.id ? this.o.masker.rootOf(opts.id) : undefined;
     if (premasked?.isConnected) el = premasked;
+    const detector = detectorOf(premasked?.isConnected && opts.id ? this.o.masker.originals(opts.id) : this.rawText(el));
     const [anchor, urlScope, frame] = await Promise.all([buildFingerprint(el), defaultScope(pageLoc()), this.frameInfo()]);
     const scope = await this.withView(urlScope, el);
     const moved = opts.id ? this.o.masker.rootOf(opts.id) : undefined;
@@ -551,6 +677,7 @@ export class Session {
       updatedAt: now,
       anchor,
       maskMode: defaultMaskMode(el),
+      ...(detector ? { detector } : {}),
     };
     if (opts.ephemeral) this.o.store.addEphemeral(sticker);
     else this.o.store.upsert(sticker);
@@ -561,10 +688,10 @@ export class Session {
     return sticker;
   }
 
-  async addRectSticker(rect: ViewRect): Promise<Sticker> {
+  async addRectSticker(rect: ViewRect, opts: { ephemeral?: boolean; source?: StickerSource } = {}): Promise<Sticker> {
     // A rectangle that is really one text element becomes an element sticker.
     const single = this.singleElementUnder(rect);
-    if (single) return this.addElementSticker(single, 'rect');
+    if (single) return this.addElementSticker(single, opts.source ?? 'rect', { ephemeral: opts.ephemeral });
     const now = Date.now();
     const under = document.elementsFromPoint(rect.x + rect.w / 2, rect.y + rect.h / 2).find((e) => !this.o.isOurs(e)) ?? null;
     const [a, urlScope, frame] = await Promise.all([anchorRect(rect, (e) => this.o.isOurs(e)), defaultScope(pageLoc()), this.frameInfo()]);
@@ -574,7 +701,7 @@ export class Session {
       id: crypto.randomUUID(),
       scope,
       frame,
-      source: 'rect',
+      source: opts.source ?? 'rect',
       padding: 0,
       createdAt: now,
       updatedAt: now,
@@ -584,17 +711,34 @@ export class Session {
       px: a.px,
       maskUnderlyingText: true,
     };
-    this.o.store.upsert(sticker);
+    if (opts.ephemeral) this.o.store.addEphemeral(sticker);
+    else this.o.store.upsert(sticker);
     const rt = this.track(sticker);
     const container = await resolveFingerprint(a.container, {
       exclude: (e) => this.o.isOurs(e),
       within: this.viewRootOf(sticker),
       ...(this.locked ? LOCKED_RESOLVE : {}),
     });
-    this.attach(rt, container?.el ?? document.body, 'high');
+    const cEl = container?.el ?? document.body;
+    // The page's own text under the rectangle, measured before it is masked.
+    const raw = coveredTextRanges(cEl, rect);
+    const rawKey = coveredKey(raw);
+    const rawTokens = coveredTokens(raw);
+    const rawBox = union(rangeRects(raw));
+    const detector = detectorOf(rawTokens.join(' '));
+    const innerEl = commonElement(raw);
+    const inner = innerEl && innerEl !== cEl && cEl.contains(innerEl) ? await buildFingerprint(innerEl) : undefined;
+    this.attach(rt, cEl, 'high');
+    const text = rawBox ? this.rectTextAnchor(rt, rect, rawKey, rawTokens, rawBox) : undefined;
+    if (text || inner || detector) {
+      const withText: RectSticker = { ...sticker, ...(text ? { text } : {}), ...(inner ? { inner } : {}), ...(detector ? { detector } : {}), updatedAt: Date.now() };
+      rt.sticker = withText;
+      rt.view.setSticker(withText);
+      this.o.store.upsert(withText);
+    }
     this.o.positioner.flush();
     this.reportState();
-    return sticker;
+    return rt.sticker;
   }
 
   /** Frame descriptor for a new sticker: origin plus a generalised path, never the raw URL. */
@@ -750,7 +894,7 @@ export class Session {
       if (rt.sticker.kind === 'element') {
         rects.push(...clientRects(rt.el).filter((r) => r.w > 0 && r.h > 0).map(grow));
       } else {
-        rects.push(grow(projectRect(rt.sticker, toViewRect(rt.el.getBoundingClientRect())).rect));
+        rects.push(grow(this.rectGeometry(rt, rt.el).rect));
       }
       for (const t of rt.ties) if (t.isConnected) rects.push(...clientRects(t).filter((r) => r.w > 0 && r.h > 0).map(grow));
     }
@@ -793,6 +937,17 @@ export class Session {
         rt.view.hide();
       }
     }
+    // A detached anchor waits for a mutation batch to be resolved again, but
+    // its replacement can arrive in a tree nobody observes yet (a new shadow
+    // root): retry on the tick as well.
+    if (!this.paused && now - this.kickAt > 250) {
+      for (const rt of this.runtimes.values()) {
+        if (rt.status !== 'resolving') continue;
+        this.kickAt = now;
+        void this.resolveAll();
+        break;
+      }
+    }
   }
 
   destroy() {
@@ -823,6 +978,13 @@ export class Session {
       ties: [],
       recheck: false,
       lostTriedAt: 0,
+      anchorAt: -1,
+      maskedIn: null,
+      fields: [],
+      driftSig: '',
+      driftAt: 0,
+      auto: false,
+      backstops: new Set(),
     };
     this.runtimes.set(sticker.id, rt);
     return rt;
@@ -834,9 +996,11 @@ export class Session {
     this.peeking.delete(id);
     this.o.masker.restore(id);
     this.clearTies(rt);
+    this.clearFields(rt);
     if (rt.el) this.o.positioner.unobserve(rt.el);
     rt.view.destroy();
     this.runtimes.delete(id);
+    this.dropBackstops(rt);
   }
 
   private attach(rt: Runtime, el: Element, confidence: Confidence) {
@@ -846,6 +1010,8 @@ export class Session {
     rt.status = 'resolved';
     rt.confidence = confidence;
     rt.recheck = false;
+    rt.auto = false;
+    this.dropBackstops(rt);
     rt.clip = clipChain(el);
     rt.lastRectKey = '';
     this.o.positioner.observe(el);
@@ -859,6 +1025,7 @@ export class Session {
     if (rt.el) this.o.positioner.unobserve(rt.el);
     this.o.masker.restore(rt.sticker.id);
     this.clearTies(rt);
+    this.clearFields(rt);
     rt.el = null;
     rt.status = 'resolving';
     rt.unresolvedSince = now - (this.lostBudget() - DETACH_GRACE_MS);
@@ -868,12 +1035,22 @@ export class Session {
 
   private markLost(rt: Runtime) {
     if (rt.status === 'lost') return;
+    // A backstop cover that lost its own content is simply dropped.
+    if (rt.sticker.source === 'backstop' && this.o.store.isEphemeral(rt.sticker.id)) {
+      this.drop(rt.sticker.id);
+      this.o.store.remove(rt.sticker.id);
+      this.reportState();
+      return;
+    }
     this.o.masker.restore(rt.sticker.id);
     this.clearTies(rt);
+    this.clearFields(rt);
     if (rt.el) this.o.positioner.unobserve(rt.el);
     rt.el = null;
     rt.status = 'lost';
     this.reportState();
+    // Fail closed: look for the content elsewhere right away, outside the frame loop.
+    setTimeout(() => this.runBackstops(rt), 0);
   }
 
   private lostBudget(): number {
@@ -898,9 +1075,13 @@ export class Session {
   /** What `el` said before this sticker (or one of its ties) masked it. */
   private maskedText(rt: Runtime, el: Element): string | undefined {
     const id = rt.sticker.id;
-    if (el === rt.el && this.o.masker.has(id)) return this.o.masker.originals(id);
+    // Text masks: the exact textContent the page wrote (originals joined with
+    // spaces would not hash like the fingerprint for a multi-node element).
+    // Input masks: the real value (strict mode holds bullets in `.value`).
+    const read = (maskId: string) => (rt.sticker.kind === 'element' && rt.sticker.maskMode !== 'text' ? this.o.masker.originals(maskId) : this.rawText(el));
+    if (el === rt.el && this.o.masker.has(id)) return read(id);
     const i = rt.ties.indexOf(el);
-    if (i >= 0 && this.o.masker.has(`${id}::tie${i}`)) return this.o.masker.originals(`${id}::tie${i}`);
+    if (i >= 0 && this.o.masker.has(`${id}::tie${i}`)) return read(`${id}::tie${i}`);
     return undefined;
   }
 
@@ -948,16 +1129,29 @@ export class Session {
           rt.recheck = false;
           const fp = rt.sticker.kind === 'element' ? rt.sticker.anchor : rt.sticker.container;
           const locked = this.locked;
-          const res = await resolveFingerprint(fp, {
-            exclude: (e) => this.o.isOurs(e) || this.anchoredByOther(e, rt),
-            textOf: (e) => this.maskedText(rt, e),
+          const ropts = {
+            exclude: (e: Element) => this.o.isOurs(e) || this.anchoredByOther(e, rt),
+            textOf: (e: Element) => this.maskedText(rt, e),
             within: this.viewRootOf(rt.sticker),
             ...(locked ? LOCKED_RESOLVE : {}),
-          });
-          if (res) {
+          };
+          let res = await resolveFingerprint(fp, ropts);
+          // A rect whose container cannot be proven any more: find the
+          // labelled element that held its text, and take its container.
+          if (!res && rt.sticker.kind === 'rect' && rt.sticker.inner) {
+            const ir = await resolveFingerprint(rt.sticker.inner, ropts);
+            const c = ir ? containerAbove(ir.el, rt.sticker.container.tag) : null;
+            if (ir && c) res = { el: c, score: ir.score, confidence: ir.confidence, ties: [] };
+          }
+          if (res && res.el === rt.el && rt.status === 'resolved' && !res.ties.length) {
+            // Re-checked and still the best match: keep the mask as it is.
+            rt.confidence = res.confidence;
+          } else if (res) {
             this.attach(rt, res.el, res.confidence);
             if (locked && this.locked && res.ties.length) this.setTies(rt, res.ties);
             this.o.positioner.markDirty();
+          } else if (rt.status === 'lost') {
+            this.runBackstops(rt);
           }
         }
       } while (this.resolveAgain && passes < 3);
@@ -968,6 +1162,308 @@ export class Session {
     // retry off the hot path instead of starving the event loop.
     if (this.resolveAgain) setTimeout(() => void this.resolveAll(), 50);
     this.reportState();
+  }
+
+  /**
+   * Element stickers whose anchor node now holds another record: a
+   * virtualised list recycled the row node, or a reused component shows the
+   * next client. The mask keeps covering the node (fail closed), and the
+   * sticker is re-resolved so it can follow its own record to whatever node
+   * shows it now. Checked synchronously with the record key and text HMACs;
+   * re-resolved when what the node shows changes, and at most once a second
+   * while it stays drifted.
+   */
+  private checkDrift() {
+    if (!hasSyncKey() || this.paused) return;
+    const now = Date.now();
+    for (const rt of this.runtimes.values()) {
+      const s = rt.sticker;
+      if (rt.status !== 'resolved' || !rt.el?.isConnected || rt.recheck) continue;
+      const fp = s.kind === 'element' ? s.anchor : s.container;
+      // Only elements identified by their own record: a page-level container
+      // (a rect drawn on `body`) changes text all the time.
+      if (s.kind === 'rect' && !fp.keyHmac) continue;
+      const key = fp.keyHmac ? keyHmacSync(rt.el) : undefined;
+      const text = fp.textHmac && s.kind === 'element' ? textHmacSync(this.maskedText(rt, rt.el) ?? this.rawText(rt.el)) : undefined;
+      // The text is the record itself: while it still matches, a missing or
+      // changed key (the cell moved into a dialog) is no reason to move.
+      const drifted = fp.textHmac && s.kind === 'element' ? text !== fp.textHmac : !!fp.keyHmac && key !== fp.keyHmac;
+      if (!drifted) {
+        rt.driftSig = '';
+        continue;
+      }
+      const sig = `${key}|${text}`;
+      if (sig !== rt.driftSig || now - rt.driftAt > 1000) {
+        rt.driftSig = sig;
+        rt.driftAt = now;
+        rt.recheck = true;
+      }
+    }
+  }
+
+  // ---- fail closed: backstops for lost stickers ----
+
+  /**
+   * A sticker is lost: before settling for a banner, look for its content
+   * elsewhere. First an element whose text HMAC equals the sticker's (any
+   * tag): re-attached, low confidence. Rect stickers: any text whose tokens
+   * hash like the covered tokens. Then, if the covered text was a
+   * high-strength pattern, every match of that pattern near the same label or
+   * heading. Backstop covers are session-only and go away when the sticker
+   * is found again.
+   */
+  private runBackstops(rt: Runtime) {
+    if (this.paused || rt.status !== 'lost' || !hasSyncKey() || this.runtimes.get(rt.sticker.id) !== rt) return;
+    const s = rt.sticker;
+    if (s.source === 'backstop') return;
+    if (s.kind === 'element') {
+      const el = this.textBackstop(rt);
+      if (el) {
+        const moved: ElementSticker = { ...s, maskMode: defaultMaskMode(el) };
+        rt.sticker = moved;
+        rt.view.setSticker(moved);
+        this.attach(rt, el, 'low');
+        rt.auto = true;
+        this.o.positioner.markDirty();
+        this.reportState();
+        return;
+      }
+    } else {
+      this.tokenBackstop(rt);
+    }
+    this.patternBackstop(rt);
+  }
+
+  /** The element whose text HMAC equals a lost element sticker's, any tag; the deepest, nearest one. */
+  private textBackstop(rt: Runtime): Element | null {
+    const s = rt.sticker as ElementSticker;
+    const fp = s.anchor;
+    if (!fp.textHmac || !fp.textLen) return null;
+    const root: ParentNode = this.viewRootOf(s) ?? scopeRootOf(fp) ?? document;
+    const hits: Element[] = [];
+    let n = 0;
+    for (const el of Array.from(root.querySelectorAll('*'))) {
+      if (++n > BACKSTOP_SWEEP_CAP) break;
+      if (NO_TEXT_TAGS.has(el.tagName) || this.o.isOurs(el) || this.o.masker.isMaskedNode(el) || this.anchoredByOther(el, rt)) continue;
+      const t = el.textContent ?? '';
+      if (t.length < fp.textLen || t.length > fp.textLen * 4 + 64) continue;
+      if (normalizeText(t).length !== fp.textLen) continue;
+      if (textHmacSync(t) === fp.textHmac) hits.push(el);
+    }
+    const deepest = hits.filter((h) => !hits.some((o) => o !== h && h.contains(o)));
+    if (!deepest.length) return null;
+    const c = { x: fp.rect.x + fp.rect.w / 2, y: fp.rect.y + fp.rect.h / 2 };
+    const dist = (e: Element) => {
+      const r = e.getBoundingClientRect();
+      return Math.hypot(r.left + scrollX + r.width / 2 - c.x, r.top + scrollY + r.height / 2 - c.y);
+    };
+    return deepest.sort((a, b) => dist(a) - dist(b))[0];
+  }
+
+  /** Session-only cover for `el` (or for `rect` inside a long block), owned by the lost sticker `rt`. */
+  private coverForBackstop(rt: Runtime, el: Element, rect: ViewRect | null) {
+    if (rt.backstops.size >= MAX_BACKSTOPS) return;
+    const p = rect ? this.addRectSticker(rect, { ephemeral: true, source: 'backstop' }) : this.addElementSticker(el, 'backstop', { ephemeral: true });
+    rt.backstops.add('pending:' + Math.random());
+    const pendingKey = Array.from(rt.backstops).pop()!;
+    void p
+      .then((st) => {
+        rt.backstops.delete(pendingKey);
+        // Found again meanwhile: the cover is no longer needed.
+        if (rt.status !== 'lost' || this.runtimes.get(rt.sticker.id) !== rt) {
+          this.drop(st.id);
+          this.o.store.remove(st.id);
+        } else {
+          rt.backstops.add(st.id);
+        }
+        this.o.positioner.markDirty();
+        this.reportState();
+      })
+      .catch((e) => {
+        rt.backstops.delete(pendingKey);
+        console.error('[aibs] backstop cover failed', e);
+      });
+  }
+
+  /** Lost rect sticker: cover text whose tokens hash like the tokens it covered. */
+  private tokenBackstop(rt: Runtime) {
+    const s = rt.sticker as RectSticker;
+    const want = new Set(s.text?.tokenHmacs ?? []);
+    const body = document.body;
+    if (!want.size || !body) return;
+    const byParent = new Map<Element, TextRange[]>();
+    let n = 0;
+    for (const t of collectTextNodes(body)) {
+      if (++n > 20_000) break;
+      const parent = t.parentElement;
+      if (!parent || this.o.isOurs(t) || this.o.masker.isMaskedNode(t)) continue;
+      const re = /\S+/g;
+      for (let m = re.exec(t.data); m; m = re.exec(t.data)) {
+        const tok = m[0];
+        // Short words ("SSN", "the") would match all over the page; numbers and longer tokens only.
+        if (!/\d/.test(tok) && tok.length < 6) continue;
+        if (!want.has(tokenHmacSync(tok) ?? '')) continue;
+        const list = byParent.get(parent) ?? [];
+        list.push({ node: t, start: m.index, end: m.index + tok.length });
+        byParent.set(parent, list);
+      }
+    }
+    for (const [parent, ranges] of byParent) {
+      const covered = ranges.reduce((a, r) => a + (r.end - r.start), 0);
+      // The element is (nearly) just the token: cover it whole; otherwise only the characters.
+      const whole = normalizeText(parent.textContent ?? '').length <= covered + 4;
+      const box = union(rangeRects(ranges));
+      this.coverForBackstop(rt, parent, whole || !box ? null : { x: box.x - 1, y: box.y - 1, w: box.w + 2, h: box.h + 2 });
+    }
+  }
+
+  /** Lost sticker whose text matched a high-strength pattern: cover that pattern near the same label or heading. */
+  private patternBackstop(rt: Runtime) {
+    const s = rt.sticker;
+    const det = s.detector;
+    const body = document.body;
+    if (!det || !body || rt.backstops.size >= MAX_BACKSTOPS) return;
+    const fp = s.kind === 'element' ? s.anchor : s.container;
+    // "Near" means the same named field or the same section, never just the
+    // same table column: every other row of the table shares that column,
+    // and those are other people's numbers, not this one moved.
+    const ownLabel = fp.labelContext && fp.labelSource !== 'column' ? fp.labelContext : undefined;
+    const column = fp.tableContext?.header;
+    const near = (el: Element) => {
+      if (column && tableContext(el)?.header === column) return false;
+      if (!ownLabel && !fp.headingContext) return true;
+      const li = labelInfo(el);
+      if (ownLabel && li?.source !== 'column' && li?.text === ownLabel) return true;
+      return !!fp.headingContext && headingContext(el) === fp.headingContext;
+    };
+    const skip = (el: Element) => this.o.isOurs(el) || this.o.masker.isMaskRoot(el);
+    const exclude = (el: Element) => this.o.isOurs(el) || this.o.masker.isMaskedNode(el);
+    const opts = { sensitivity: 'aggressive' as const, ids: new Set([det]), exclude };
+    const hits = allBlocks(body, { skip, cap: 20_000 }).flatMap((b) => detectBlock(b, opts));
+    hits.push(...detectInputs(document, opts));
+    for (const hit of hits) {
+      if (rt.backstops.size >= MAX_BACKSTOPS) break;
+      if (!hit.el.isConnected || !near(hit.el)) continue;
+      this.coverForBackstop(rt, hit.el, hit.wide ? matchRect(hit) : null);
+    }
+  }
+
+  private dropBackstops(rt: Runtime) {
+    if (!rt.backstops.size) return;
+    for (const id of Array.from(rt.backstops)) {
+      if (id.startsWith('pending:')) continue;
+      if (this.o.store.isEphemeral(id)) {
+        this.drop(id);
+        this.o.store.remove(id);
+      }
+      rt.backstops.delete(id);
+    }
+  }
+
+  // ---- pre-paint fast path ----
+
+  /**
+   * Synchronous, inside the mutation callback: an element sticker that is
+   * detached, lost, or whose node drifted to another record looks for its
+   * content among the nodes this callback inserted or rewrote. A node whose
+   * text HMAC (and record key, id, test id where stored) matches is masked
+   * and attached before the page can paint it or a script can read it; the
+   * next resolver pass re-checks the choice (low confidence until then).
+   */
+  onRecords(records: MutationRecord[]) {
+    if (this.paused || !hasSyncKey()) return;
+    const pending: Runtime[] = [];
+    for (const rt of this.runtimes.values()) {
+      if (rt.sticker.kind !== 'element' || rt.sticker.source === 'backstop') continue;
+      if (rt.status !== 'resolved' || !rt.el?.isConnected || rt.driftSig || (rt.el && this.drifted(rt))) pending.push(rt);
+    }
+    // View stickers whose viewer is not registered yet (it opens without a
+    // navigation, and the view hash waits for the next batch): an exact text
+    // match is masked now; the next view scan keeps or drops it.
+    const dormant = this.urlActive.filter((s) => s.kind === 'element' && s.scope.viewHmac && !this.runtimes.has(s.id)) as ElementSticker[];
+    if (!pending.length && !dormant.length) return;
+    const roots = new Set<Element>();
+    for (const r of records) {
+      if (r.type === 'childList') {
+        if (r.target.nodeType === Node.ELEMENT_NODE) roots.add(r.target as Element);
+        r.addedNodes.forEach((a) => a.nodeType === Node.ELEMENT_NODE && roots.add(a as Element));
+      } else if (r.type === 'characterData') {
+        const p = (r.target as Text).parentElement;
+        if (p) roots.add(p);
+      }
+      if (roots.size > 64) break;
+    }
+    const work: Array<{ s: ElementSticker; rt?: Runtime }> = [...pending.map((rt) => ({ s: rt.sticker as ElementSticker, rt })), ...dormant.map((s) => ({ s }))];
+    for (const { s, rt: known } of work) {
+      const fp = s.anchor;
+      // The text must match: a record key alone is shared by every cell of its row.
+      if (!fp.textHmac) continue;
+      let seen = 0;
+      search: for (const root of roots) {
+        if (!root.isConnected || this.o.isOurs(root)) continue;
+        const cands = root.matches(fp.tag) ? [root] : [];
+        cands.push(...Array.from(root.querySelectorAll(fp.tag)).slice(0, 200));
+        for (const c of cands) {
+          if (++seen > BACKSTOP_SWEEP_CAP) break search;
+          if (c === known?.el || this.o.masker.isMaskedNode(c) || (known && this.anchoredByOther(c, known))) continue;
+          if (!this.fastMatch(fp, c)) continue;
+          const rt = known ?? this.track(s);
+          this.attach(rt, c, 'low');
+          rt.recheck = true;
+          rt.driftSig = '';
+          this.o.positioner.markDirty();
+          break search;
+        }
+      }
+    }
+  }
+
+  /** The anchor node no longer shows the sticker's record (key or text HMAC differ). */
+  private drifted(rt: Runtime): boolean {
+    const s = rt.sticker;
+    if (s.kind !== 'element' || !rt.el) return false;
+    const fp = s.anchor;
+    if (!fp.textHmac) return false;
+    return textHmacSync(this.maskedText(rt, rt.el) ?? this.rawText(rt.el)) !== fp.textHmac;
+  }
+
+  private fastMatch(fp: ElementSticker['anchor'], el: Element): boolean {
+    if (fp.textHmac) {
+      const t = fingerprintText(el);
+      if (t.length < fp.textLen || t.length > fp.textLen * 4 + 64) return false;
+      if (normalizeText(t).length !== fp.textLen || textHmacSync(t) !== fp.textHmac) return false;
+    }
+    if (fp.keyHmac && keyHmacSync(el) !== fp.keyHmac) return false;
+    if (fp.id && el.id !== fp.id) return false;
+    return true;
+  }
+
+  /** What the banner reports for this frame. */
+  bannerState(): { lost: number; reattached: number; backstop: number; firstLost?: string } {
+    let lost = 0;
+    let reattached = 0;
+    let backstop = 0;
+    let firstLost: string | undefined;
+    for (const rt of this.runtimes.values()) {
+      if (rt.sticker.source === 'backstop') {
+        if (rt.status === 'resolved') backstop++;
+        continue;
+      }
+      if (rt.status === 'lost') {
+        lost++;
+        firstLost ??= rt.sticker.id;
+      } else if (rt.status === 'resolved' && rt.auto) reattached++;
+    }
+    return { lost, reattached, backstop, firstLost };
+  }
+
+  /** `el.textContent` as the page wrote it: our bullets swapped back for the originals. */
+  private rawText(el: Element): string {
+    if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement) return fingerprintText(el);
+    const w = el.ownerDocument.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+    let s = '';
+    for (let n = w.nextNode(); n; n = w.nextNode()) s += this.o.masker.originalText(n as Text) ?? (n as Text).data;
+    return s;
   }
 
   private anchoredByOther(el: Element, self: Runtime): boolean {
@@ -990,10 +1486,11 @@ export class Session {
     } else {
       const box = toViewRect(el.getBoundingClientRect());
       const p = projectRect(rt.sticker, box);
-      rects = [p.rect];
-      if (p.confidence === 'low') confidence = 'low';
       rt.lastRect = p.rect;
       this.maskUnderRect(rt, el, p.rect);
+      const g = this.rectGeometry(rt, el);
+      rects = [g.rect];
+      if (g.confidence === 'low') confidence = 'low';
     }
     // Recompute the clip chain occasionally: ancestors can change overflow.
     if (rt.clip.some((c) => !c.isConnected)) rt.clip = clipChain(el);
@@ -1023,13 +1520,141 @@ export class Session {
     // whenever the masker holds no split for this id, including when the scan
     // found ranges but every node was already cut up by another sticker, so
     // this keeps retrying until something is really masked or the sticker goes.
-    if (key === rt.lastRectKey && this.o.masker.has(s.id) && !this.o.masker.isStale(s.id)) return;
+    //
+    // Once something is masked, the mask belongs to those characters (text
+    // anchoring): a projection that moves because a font arrived or the page
+    // zoomed must not move the mask off them. Only a disturbed split, a new
+    // container or "nothing masked" rescans.
+    const masked = this.o.masker.has(s.id) || rt.fields.length > 0;
+    if (masked && !this.o.masker.isStale(s.id) && (rt.maskedIn === container || key === rt.lastRectKey)) return;
     rt.lastRectKey = key;
     // Measure the page's own text: put anything we masked back first, so the
     // character rects are the real ones and the scan stays idempotent.
     this.o.masker.restore(s.id);
-    const ranges = coveredTextRanges(container, rect);
+    rt.maskedIn = null;
+    this.maskFieldsUnder(rt, container, rect);
+    const ranges = this.locateRectText(rt, container, rect);
     if (ranges.length) this.o.masker.applyTextRanges(s.id, container, ranges);
+    if (this.o.masker.has(s.id) || rt.fields.length) rt.maskedIn = container;
+  }
+
+  /**
+   * Form fields under a rect sticker are masked whole, in input mode. Their
+   * value is not DOM text, so the text scan never sees it, and the field
+   * would otherwise stay readable in the accessibility tree.
+   */
+  private maskFieldsUnder(rt: Runtime, container: Element, rect: ViewRect) {
+    const s = rt.sticker;
+    const found: Element[] = [];
+    const cands = [container, ...Array.from(container.querySelectorAll(FIELD_SELECTOR))].filter((e) => e.matches(FIELD_SELECTOR) && !this.o.isOurs(e));
+    for (const f of cands.slice(0, 200)) {
+      const b = toViewRect(f.getBoundingClientRect());
+      const i = intersect(b, rect);
+      if (i && area(i) >= 0.2 * Math.min(area(b), area(rect))) found.push(f);
+    }
+    if (found.length === rt.fields.length && found.every((f, i) => f === rt.fields[i])) return;
+    this.clearFields(rt);
+    rt.fields = found;
+    found.forEach((f, i) => this.o.masker.apply(`${s.id}::field${i}`, f, 'input'));
+  }
+
+  private clearFields(rt: Runtime) {
+    rt.fields.forEach((_, i) => this.o.masker.restore(`${rt.sticker.id}::field${i}`));
+    rt.fields = [];
+  }
+
+  /**
+   * The characters a rect sticker should mask in `container` now: the ones it
+   * masked before (in memory), else the window hashing to its stored
+   * `coverHmac` nearest to the projection, else (fail closed) whatever the
+   * projected rectangle covers.
+   */
+  private locateRectText(rt: Runtime, container: Element, rect: ViewRect): TextRange[] {
+    const s = rt.sticker as RectSticker;
+    const proj = coveredTextRanges(container, rect);
+    const want = s.text && hasSyncKey() ? s.text : undefined;
+    if (!rt.anchorKey && !want) return proj;
+    const st = stripped(container);
+    if (!st) return proj;
+    const guess = proj.length ? startOf(st, proj) : -1;
+    const near = guess >= 0 ? guess : rt.anchorAt;
+    if (rt.anchorKey) {
+      const i = locateExact(st, rt.anchorKey, near);
+      if (i >= 0) {
+        rt.anchorAt = i;
+        return rangesForSpan(st, i, rt.anchorKey.length);
+      }
+      // The page wrote our bullets back into its own text (`normalize()`
+      // merged the split, a re-render copied the masked DOM): the secret is
+      // gone from the page and the bullets stand where it was.
+      const b = locateExact(st, '•'.repeat(rt.anchorKey.length), rt.anchorAt >= 0 ? rt.anchorAt : near);
+      if (b >= 0) return rangesForSpan(st, b, rt.anchorKey.length);
+    }
+    if (want) {
+      if (proj.length && coveredHmacSync(coveredKey(proj)) === want.coverHmac) {
+        rt.anchorKey = coveredKey(proj);
+        rt.anchorAt = guess;
+        return proj;
+      }
+      const i = locateByHash(st, want.len, want.coverHmac, coveredHmacSync, near);
+      if (i >= 0) {
+        rt.anchorKey = st.s.slice(i, i + want.len);
+        rt.anchorAt = i;
+        return rangesForSpan(st, i, want.len);
+      }
+    }
+    return proj;
+  }
+
+  /**
+   * Where a rect sticker is drawn: around the characters it masked, wherever
+   * they are now, grown by the margins recorded at creation; the projected
+   * rectangle when it masks no text (or predates text anchoring).
+   */
+  private rectGeometry(rt: Runtime, el: Element): { rect: ViewRect; confidence: Confidence } {
+    const s = rt.sticker as RectSticker;
+    const p = projectRect(s, toViewRect(el.getBoundingClientRect()));
+    const t = s.text;
+    if (!t || !this.o.masker.has(s.id)) return p;
+    const rs = this.o.masker.subsetRects(s.id);
+    const bb = union(rs);
+    if (!bb) return p;
+    const lh = rs.reduce((a, r) => a + r.h, 0) / rs.length;
+    const k = t.lh > 0 ? lh / t.lh : 1;
+    const m = t.margin;
+    return { rect: { x: bb.x - m.l * k, y: bb.y - m.t * k, w: bb.w + (m.l + m.r) * k, h: bb.h + (m.t + m.b) * k }, confidence: 'high' };
+  }
+
+  /**
+   * Text anchor for a rect sticker that just masked `raw` (measured before
+   * masking) under the drawn `rect`. A side drawn tight to the text (within
+   * TIGHT_PX) keeps that gap around the text; a looser side keeps the drawn
+   * edge, measured from the masked text (bullets are narrower than digits).
+   */
+  private rectTextAnchor(rt: Runtime, rect: ViewRect, key: string, tokens: string[], rawBox: ViewRect): RectText | undefined {
+    const s = rt.sticker;
+    if (s.kind !== 'rect' || !key || !hasSyncKey() || !this.o.masker.has(s.id)) return undefined;
+    const coverHmac = coveredHmacSync(key);
+    const now = this.o.masker.subsetRects(s.id);
+    const nowBox = union(now);
+    if (!coverHmac || !rawBox || !nowBox) return undefined;
+    const side = (drawn: number, rawEdge: number, nowEdge: number) => {
+      const tight = drawn - rawEdge;
+      return Math.max(0, tight <= TIGHT_PX ? tight : drawn - nowEdge);
+    };
+    // Left/top edges are compared negated so "drawn beyond the text" is positive on every side.
+    const margin = {
+      l: side(-rect.x, -rawBox.x, -nowBox.x),
+      t: side(-rect.y, -rawBox.y, -nowBox.y),
+      r: side(rect.x + rect.w, rawBox.x + rawBox.w, nowBox.x + nowBox.w),
+      b: side(rect.y + rect.h, rawBox.y + rawBox.h, nowBox.y + nowBox.h),
+    };
+    rt.anchorKey = key;
+    const tokenHmacs = tokens
+      .map((x) => tokenHmacSync(x))
+      .filter((h): h is string => !!h)
+      .slice(0, 32);
+    return { coverHmac, len: key.length, tokenHmacs, margin, lh: now.reduce((a, r) => a + r.h, 0) / now.length };
   }
 
   private positionGhost(rt: Runtime) {

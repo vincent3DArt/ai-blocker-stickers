@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Stress: tabs and accordion</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 0; padding: 16px; }
+  [role=tablist] button { padding: 6px 12px; }
+  [role=tablist] button[aria-selected=true] { font-weight: bold; }
+  [role=tabpanel] { border: 1px solid #aaa; padding: 12px; width: 640px; }
+  .acc { border: 1px solid #ccc; margin: 6px 0; }
+  .acc > button { display: block; width: 100%; text-align: left; padding: 6px; }
+  .acc > div { padding: 6px 12px; }
+</style>
+</head>
+<body>
+<h1>Client record</h1>
+<div role="tablist">
+  <button role="tab" id="tab-a" aria-selected="true">Profile</button>
+  <button role="tab" id="tab-b" aria-selected="false">Billing</button>
+</div>
+<div id="panels"></div>
+<script src="/stress/common.js"></script>
+<script>
+  // Tabs unmount the inactive panel (React-style conditional render); the
+  // accordion hides its body with the `hidden` attribute.
+  const SECRET = '123-45-6789';
+  const panels = document.getElementById('panels');
+  let tab = 'a';
+  let open = true;
+  const panelA = () => `
+    <div role="tabpanel" id="panel-a" aria-labelledby="tab-a">
+      <div class="acc"><button type="button" aria-expanded="true">Contact</button><div><p>Phone on file, email on file.</p></div></div>
+      <div class="acc" id="acc-identity"><button type="button" aria-expanded="${open}">Identity</button>
+        <div class="acc-body"${open ? '' : ' hidden'}><p>Name: Jane Example</p><p class="ident">Taxpayer SSN ${SECRET} (primary)</p></div></div>
+    </div>`;
+  const panelB = () => `<div role="tabpanel" id="panel-b" aria-labelledby="tab-b"><p>Invoices: none outstanding.</p></div>`;
+  function render() {
+    panels.innerHTML = tab === 'a' ? panelA() : panelB();
+    document.getElementById('tab-a').setAttribute('aria-selected', String(tab === 'a'));
+    document.getElementById('tab-b').setAttribute('aria-selected', String(tab === 'b'));
+  }
+  function setOpen(v) {
+    open = v;
+    const body = document.querySelector('#acc-identity .acc-body');
+    if (body) body.hidden = !v;
+    const b = document.querySelector('#acc-identity > button');
+    if (b) b.setAttribute('aria-expanded', String(v));
+  }
+  const { wait, frames, targetFor } = window.__stress;
+  window.__fx = {
+    actions: ['switch-tabs', 'collapse-expand', 'remount', 'collapse-remount-expand', 'spec:reload'],
+    async run(name) {
+      switch (name) {
+        case 'switch-tabs': tab = 'b'; render(); await wait(400); tab = 'a'; render(); break;
+        case 'collapse-expand': setOpen(false); await wait(400); setOpen(true); break;
+        case 'remount': render(); break;
+        case 'collapse-remount-expand': setOpen(false); await wait(200); render(); await wait(400); setOpen(true); break;
+      }
+      await frames();
+    },
+    target: () => targetFor(document.querySelector('#panel-a p.ident')),
+    secrets: () => [SECRET],
+    cover: { selector: '#panel-a p.ident' },
+  };
+  render();
+</script>
+</body>
+</html>

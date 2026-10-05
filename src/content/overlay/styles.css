@@ -260,3 +260,45 @@
   background: #b45309;
   color: #fff;
 }
+
+/* Lost / save-error banner: top of the viewport, never dismissed silently. */
+.banner {
+  position: absolute;
+  top: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: min(760px, calc(100% - 16px));
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  align-items: center;
+  padding: 8px 12px;
+  background: #b45309;
+  color: #fff;
+  border-radius: 0 0 8px 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+  font: 600 13px/1.35 system-ui, sans-serif;
+  pointer-events: auto;
+  z-index: 5;
+}
+
+.banner .banner-msg {
+  cursor: pointer;
+}
+
+.banner button {
+  all: unset;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: #fff;
+  color: #92400e;
+  cursor: pointer;
+  white-space: nowrap;
+  font: 600 12px/1.2 system-ui, sans-serif;
+}
+
+.banner button.banner-dismiss {
+  background: transparent;
+  color: #fff;
+  text-decoration: underline;
+}

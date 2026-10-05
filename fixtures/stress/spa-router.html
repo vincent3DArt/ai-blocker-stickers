@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Stress: SPA router</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 0; padding: 16px; }
+  .field { margin: 8px 0; width: 640px; }
+  .label { display: inline-block; width: 120px; font-weight: 600; }
+</style>
+</head>
+<body>
+<nav><a href="/stress/clients/1">Client 1</a> <a href="/stress/clients/2">Client 2</a> <a href="/stress/settings">Settings</a></nav>
+<main id="view"></main>
+<script src="/stress/common.js"></script>
+<script>
+  // One ClientView component reused across records: switching client updates
+  // its text nodes in place (React reconciliation); "remount" unmounts it
+  // behind a loading state and mounts a fresh copy.
+  const CLIENTS = {
+    1: { name: 'Jane Example', ssn: '123-45-6789' },
+    2: { name: 'John Sample', ssn: '234-56-7890' },
+  };
+  const view = document.getElementById('view');
+  let mounted = null;
+  function current() {
+    const m = location.pathname.match(/^\/stress\/clients\/(\d+)$/);
+    return m && CLIENTS[m[1]] ? CLIENTS[m[1]] : null;
+  }
+  function mount(c) {
+    view.innerHTML = `<h1>Client</h1>
+      <div class="field"><span class="label">Name</span><span class="v-name"></span></div>
+      <div class="field"><span class="label">Tax id</span><span class="v-ssn"></span></div>`;
+    mounted = { name: view.querySelector('.v-name'), ssn: view.querySelector('.v-ssn') };
+    mounted.name.appendChild(document.createTextNode(''));
+    mounted.ssn.appendChild(document.createTextNode(''));
+    update(c);
+  }
+  function update(c) {
+    mounted.name.firstChild.data = c.name;
+    mounted.ssn.firstChild.data = `Taxpayer SSN ${c.ssn} (primary)`;
+  }
+  function render() {
+    const c = current();
+    if (!c) { mounted = null; view.innerHTML = '<h1>Settings</h1><p>Nothing sensitive here.</p>'; return; }
+    if (mounted && mounted.ssn.isConnected) update(c); else mount(c);
+  }
+  function go(p) { history.pushState({}, '', p); render(); }
+  addEventListener('popstate', render);
+  const { wait, frames, targetFor } = window.__stress;
+  window.__fx = {
+    actions: ['client-2', 'client-1', 'remount', 'route-away-back', 'client-2', 'spec:reload', 'client-1'],
+    async run(name) {
+      switch (name) {
+        case 'client-2': go('/stress/clients/2'); break;
+        case 'client-1': go('/stress/clients/1'); break;
+        case 'remount': mounted = null; view.innerHTML = '<p>Loading…</p>'; await wait(300); render(); break;
+        case 'route-away-back': go('/stress/settings'); await wait(500); go('/stress/clients/1'); break;
+      }
+      await frames();
+    },
+    target: () => targetFor(document.querySelector('#view .v-ssn')),
+    secrets: () => (current() ? [current().ssn] : []),
+    cover: { selector: '#view .v-ssn' },
+  };
+  render();
+</script>
+</body>
+</html>

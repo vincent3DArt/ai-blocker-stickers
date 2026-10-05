@@ -121,7 +121,7 @@ function isAmbiguous(el: Element, seg: string): boolean {
   }
 }
 
-function matchCount(root: Document | Element, selector: string): number {
+function matchCount(root: Document | ShadowRoot | Element, selector: string): number {
   try {
     return root.querySelectorAll(selector).length;
   } catch {
@@ -136,7 +136,7 @@ function matchCount(root: Document | Element, selector: string): number {
  * made unique (resolution scores handle that); in that case a positional
  * segment is added to every ambiguous level.
  */
-export function buildCssPath(el: Element, maxSegments = 8): string {
+export function buildCssPath(el: Element, maxSegments = 8, root: Document | ShadowRoot = document): string {
   const segments: string[] = [];
   const chain: Element[] = [];
   let node: Element | null = el;
@@ -180,11 +180,11 @@ export function buildCssPath(el: Element, maxSegments = 8): string {
   }
 
   let path = segments.join(' > ');
-  if (matchCount(document, path) !== 1) {
+  if (matchCount(root, path) !== 1) {
     // Force positional segments everywhere below the root segment.
     const forced = chain.map((n, i) => (i === 0 ? segments[0] : segmentFor(n, true)));
     const forcedPath = forced.join(' > ');
-    if (matchCount(document, forcedPath) === 1) path = forcedPath;
+    if (matchCount(root, forcedPath) === 1) path = forcedPath;
   }
   return path;
 }
@@ -214,9 +214,9 @@ export function evalXPath(xpath: string): Element[] {
   }
 }
 
-export function queryAll(selector: string): Element[] {
+export function queryAll(selector: string, root: Document | ShadowRoot = document): Element[] {
   try {
-    return Array.from(document.querySelectorAll(selector));
+    return Array.from(root.querySelectorAll(selector));
   } catch {
     return [];
   }

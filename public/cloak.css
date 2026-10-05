@@ -1,0 +1,19 @@
+/*
+ * Boot cloak. Injected by the browser at document_start, before the page is
+ * parsed, on origins that have stickers, and lifted by the content script as
+ * soon as the stickers that apply are in place (it marks its overlay host
+ * `data-aibs-ready`). Until then the page is visibility:hidden: not painted,
+ * not in innerText, not in the accessibility tree. If the content script
+ * never gets that far, the animation lifts the cloak after 1.5 s anyway, so a
+ * broken extension can delay a page but never blank it.
+ */
+:root:not(:has(> aibs-host[data-aibs-ready])) {
+  visibility: hidden;
+  animation: aibs-uncloak 1ms linear 1500ms forwards;
+}
+
+@keyframes aibs-uncloak {
+  to {
+    visibility: visible;
+  }
+}

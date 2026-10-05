@@ -12,10 +12,14 @@ export interface OverlayHost {
   /** Re-mount and re-promote to the top layer if the page displaced us. */
   reassert(): void;
   setColor(color: string): void;
+  /** Lift the boot cloak (public/cloak.css): the stickers that apply are in place. */
+  markReady(): void;
   destroy(): void;
 }
 
 const TAG = 'aibs-host';
+/** Set once the stickers are in place; the boot cloak keys on it. */
+const READY_ATTR = 'data-aibs-ready';
 
 const HOST_ATTRS: Array<[string, string]> = [
   ['popover', 'manual'],
@@ -26,7 +30,8 @@ const HOST_ATTRS: Array<[string, string]> = [
 
 export function mountHost(): OverlayHost {
   const el = document.createElement(TAG);
-  for (const [a, v] of HOST_ATTRS) el.setAttribute(a, v);
+  const attrs = HOST_ATTRS.slice();
+  for (const [a, v] of attrs) el.setAttribute(a, v);
   let color = '';
   let fallbackZ = false;
   let expectedStyle: string | null = null;
@@ -115,7 +120,7 @@ export function mountHost(): OverlayHost {
       else if (r.attributeName) reattr = true;
     }
     if (reattr) {
-      for (const [a, v] of HOST_ATTRS) if (el.getAttribute(a) !== v) el.setAttribute(a, v);
+      for (const [a, v] of attrs) if (el.getAttribute(a) !== v) el.setAttribute(a, v);
       for (const a of ['hidden', 'inert']) if (el.hasAttribute(a)) el.removeAttribute(a);
       promote();
     }
@@ -123,7 +128,7 @@ export function mountHost(): OverlayHost {
     if (remount && el.parentElement !== document.documentElement) mount();
   });
   watchdog.observe(document.documentElement, { childList: true });
-  watchdog.observe(el, { attributes: true, attributeFilter: ['style', ...HOST_ATTRS.map(([a]) => a), 'hidden', 'inert'] });
+  watchdog.observe(el, { attributes: true, attributeFilter: ['style', ...HOST_ATTRS.map(([a]) => a), READY_ATTR, 'hidden', 'inert'] });
 
   function topLayerSignature(): string {
     // Anything the page pushed into the top layer after us stacks above us.
@@ -167,6 +172,11 @@ export function mountHost(): OverlayHost {
     setColor(c) {
       color = c;
       styleHost();
+    },
+    markReady() {
+      if (attrs.some(([a]) => a === READY_ATTR)) return;
+      attrs.push([READY_ATTR, '']);
+      el.setAttribute(READY_ATTR, '');
     },
     destroy() {
       destroyed = true;

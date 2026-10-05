@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Stress: iframes</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 0; padding: 16px; }
+  iframe { display: block; border: 1px solid #999; margin: 8px 0; }
+  #reloader { width: 600px; height: 110px; }
+  #mid { width: 640px; height: 200px; }
+</style>
+</head>
+<body>
+<h1>Frames</h1>
+<iframe id="reloader" src="/stress/frame-reload.html" title="Reloading frame"></iframe>
+<iframe id="mid" src="/stress/frame-mid.html" title="Middle frame"></iframe>
+<script src="/stress/common.js"></script>
+<script>
+  // Variant (query string): `?v=nested` targets the frame two levels deep.
+  const nested = new URLSearchParams(location.search).get('v') === 'nested';
+  const SECRET = nested ? '987-65-4321' : '123-45-6789';
+  const { wait, frames, targetFor } = window.__stress;
+  const leafDoc = () => document.getElementById('mid').contentDocument?.getElementById('leaf')?.contentDocument;
+  const doc = () => (nested ? leafDoc() : document.getElementById('reloader').contentDocument);
+  window.__fx = {
+    actions: nested ? ['leaf-rerender', 'mid-reload', 'wait-2s', 'spec:reload'] : ['wait-reload', 'wait-reload', 'reloader-rerender', 'spec:reload'],
+    async run(name) {
+      switch (name) {
+        case 'wait-reload': await wait(2300); break;
+        case 'wait-2s': await wait(2000); break;
+        case 'reloader-rerender': document.getElementById('reloader').contentWindow.__rerender?.(); break;
+        case 'leaf-rerender': leafDoc()?.defaultView.__rerender?.(); break;
+        case 'mid-reload': document.getElementById('mid').contentWindow.location.reload(); await wait(800); break;
+      }
+      await frames();
+    },
+    target: () => {
+      const d = doc();
+      return d && d.readyState !== 'loading' ? targetFor(d.querySelector('p.ident')) : null;
+    },
+    secrets: () => [SECRET],
+    cover: { selector: 'p.ident', frame: nested ? '/stress/frame-leaf.html' : '/stress/frame-reload.html' },
+  };
+</script>
+</body>
+</html>

@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Stress: web components</title>
+<style>body { font-family: system-ui, sans-serif; margin: 0; padding: 16px; } x-app { display: block; width: 640px; }</style>
+</head>
+<body>
+<h1>Components</h1>
+<x-app></x-app>
+<script src="/stress/common.js"></script>
+<script>
+  // Two open shadow roots deep; the inner card re-renders by replacing its
+  // whole template every 500 ms, lit-html style.
+  const SECRET = '123-45-6789';
+  class XCard extends HTMLElement {
+    constructor() { super(); this.attachShadow({ mode: 'open' }); this.n = 0; }
+    connectedCallback() { this.render(); this.timer = setInterval(() => this.render(), 500); }
+    disconnectedCallback() { clearInterval(this.timer); }
+    render() {
+      this.n++;
+      this.shadowRoot.innerHTML = `<style>p { margin: 6px 0; } .card { border: 1px solid #ccc; padding: 8px; }</style>
+        <div class="card"><p>Client: Jane Example</p><p class="ident">Taxpayer SSN ${SECRET} (primary)</p><p>Renders: many</p></div>`;
+    }
+  }
+  class XApp extends HTMLElement {
+    constructor() { super(); this.attachShadow({ mode: 'open' }); this.extra = 0; }
+    connectedCallback() { this.render(); }
+    render() {
+      const extra = Array.from({ length: this.extra }, (_, i) => `<p>Banner ${'abcdefgh'[i % 8]}</p>`).join('');
+      this.shadowRoot.innerHTML = `<style>:host { display: block; }</style><header>App header</header>${extra}<x-card></x-card>`;
+    }
+  }
+  customElements.define('x-card', XCard);
+  customElements.define('x-app', XApp);
+  const app = document.querySelector('x-app');
+  const { wait, frames, targetFor } = window.__stress;
+  window.__fx = {
+    actions: ['wait-rerenders', 'outer-rerender', 'insert-above', 'spec:reload'],
+    async run(name) {
+      switch (name) {
+        case 'wait-rerenders': await wait(1600); break;
+        case 'outer-rerender': app.render(); break;
+        case 'insert-above': app.extra += 2; app.render(); break;
+      }
+      await frames();
+    },
+    target: () => {
+      const card = app.shadowRoot.querySelector('x-card');
+      return targetFor(card && card.shadowRoot.querySelector('p.ident'));
+    },
+    secrets: () => [SECRET],
+    cover: { selector: 'p.ident', shadowPath: ['x-app', 'x-card'] },
+  };
+</script>
+</body>
+</html>
