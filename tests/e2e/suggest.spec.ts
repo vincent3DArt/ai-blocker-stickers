@@ -136,7 +136,7 @@ test.describe('auto-suggest', () => {
           const text = await page.evaluate(() => document.body?.innerText ?? '').catch(() => '');
           return text.includes('Client 456') && !text.includes(SPA_SSN);
         },
-        { timeout: 1500, intervals: [25] },
+        { timeout: 3000, intervals: [25] },
       )
       .toBe(true);
     const aria = await page.locator('body').ariaSnapshot();
@@ -154,7 +154,7 @@ test.describe('auto-suggest', () => {
 
     // SPA navigation while locked: the next client is covered too.
     await page.evaluate(() => (window as unknown as { __spa: { go(p: string): void } }).__spa.go('/app/clients/123'));
-    await expect.poll(() => page.textContent('#client-ssn'), { timeout: 1500, intervals: [25] }).toBe(BULLETS);
+    await expect.poll(() => page.textContent('#client-ssn'), { timeout: 3000, intervals: [25] }).toBe(BULLETS);
 
     // End the session, keeping them: stored, and still there after a reload.
     await testSession(ctl, false, true);

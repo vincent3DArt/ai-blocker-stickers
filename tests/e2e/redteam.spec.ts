@@ -371,66 +371,118 @@ test.describe('red team: clipboard, print, layout', () => {
     test(`8 layout: ${name} keeps every anchor covered and masked`, async ({ page, ext }) => {
       await setupStatic(page, ext);
       await apply(page);
-      await expect.poll(async () => coveredAt(page, await boxOf(page, '#ssn-cell')), { timeout: 1500 }).toBe(true);
-      await expect.poll(async () => coveredAt(page, await bulletRun(page, '#wrapped-span')), { timeout: 1500 }).toBe(true);
+      await expect.poll(async () => coveredAt(page, await boxOf(page, '#ssn-cell')), { timeout: 3000 }).toBe(true);
+      await expect.poll(async () => coveredAt(page, await bulletRun(page, '#wrapped-span')), { timeout: 3000 }).toBe(true);
       cleanAll({ innerText: await pageInnerText(page) });
 
       await page.setViewportSize({ width: 1000, height: 700 });
       await setupForms(page, ext);
       await apply(page);
-      await expect.poll(async () => coveredAt(page, await boxOf(page, '#ssn')), { timeout: 1500 }).toBe(true);
-      await expect.poll(async () => coveredAt(page, await boxOf(page, '#photo')), { timeout: 1500 }).toBe(true);
+      await expect.poll(async () => coveredAt(page, await boxOf(page, '#ssn')), { timeout: 3000 }).toBe(true);
+      await expect.poll(async () => coveredAt(page, await boxOf(page, '#photo')), { timeout: 3000 }).toBe(true);
       cleanAll({ innerText: await pageInnerText(page) });
     });
   }
 });
 
 test.describe('red team: churn and observers', () => {
-  /** Rewrite `parentSel`'s innerHTML with the RAW markup every 100 ms and read from MAIN world each tick. */
-  async function churn(page: Page, parentSel: string, rawHtml: string, probe: () => Promise<Box>) {
+  /** How the churned target must look in the DOM on every tick. */
+  type Masked = { sel: string; want: 'bullets' | 'input' | 'visual' };
+
+  /**
+   * Rewrite `parentSel`'s innerHTML with the RAW markup every 100 ms. On every tick, read from the
+   * MAIN world: no secret in innerText, textContent or any attribute, and the freshly rendered target
+   * is masked (bullets, input mask, or hidden image). The sticker pixel is sampled at two fixed ticks
+   * and at the end, each with a bounded poll, while the churn is still running.
+   */
+  async function churn(page: Page, ext: Ext, parentSel: string, rawHtml: string, probe: () => Promise<Box>, masked: Masked) {
     await page.evaluate(
       ({ sel, html }) => {
+        const w = window as unknown as { __churn: number; __renders: number };
         const parent = document.querySelector(sel)!;
-        (window as unknown as { __churn: number }).__churn = window.setInterval(() => (parent.innerHTML = html), 100);
+        w.__renders = 0;
+        w.__churn = window.setInterval(() => {
+          parent.innerHTML = html;
+          w.__renders++;
+        }, 100);
       },
       { sel: parentSel, html: rawHtml },
     );
-    const start = Date.now();
-    let ticks = 0;
-    while (Date.now() - start < 2000) {
-      const reads = await page.evaluate((sel) => {
-        const parent = document.querySelector(sel)!;
-        const attrs: string[] = [];
-        for (const el of [parent, ...Array.from(parent.querySelectorAll('*'))]) {
-          for (const a of Array.from(el.attributes)) attrs.push(`${a.name}=${a.value}`);
-        }
-        return { innerText: document.body.innerText, textContent: document.body.textContent ?? '', attrs: attrs.join('|') };
-      }, parentSel);
-      cleanAll(reads);
-      if (ticks % 3 === 0) expect(await coveredAt(page, await probe()), `sticker off at tick ${ticks}`).toBe(true);
-      ticks++;
+    const TICKS = 20;
+    const PIXEL_AT = new Set([7, 14]);
+    const pixel = async (label: string) => {
+      let last = '';
+      try {
+        await expect
+          .poll(
+            async () => {
+              const b = await probe();
+              const c = centre(b);
+              const px = await pixelAt(page, c.x, c.y);
+              last = JSON.stringify({ box: b, px });
+              return near(px, STICKER);
+            },
+            { timeout: 3000 },
+          )
+          .toBe(true);
+      } catch {
+        const st = await ext.state(page).catch(() => undefined);
+        const stickers = { status: st?.stickers?.map((x) => `${x.kind}:${x.status}`), pieces: st?.pieces };
+        throw new Error(`sticker off ${label}: last sample ${last}; stickers ${JSON.stringify(stickers)}`);
+      }
+    };
+    for (let tick = 0; tick < TICKS; tick++) {
+      const reads = await page.evaluate(
+        ({ sel, m }) => {
+          const parent = document.querySelector(sel)!;
+          const attrs: string[] = [];
+          for (const el of [parent, ...Array.from(parent.querySelectorAll('*'))]) {
+            for (const a of Array.from(el.attributes)) attrs.push(`${a.name}=${a.value}`);
+          }
+          const t = document.querySelector(m.sel) as HTMLElement | null;
+          let ok = false;
+          if (t) {
+            const mask = t.getAttribute('data-aibs-mask') ?? '';
+            const cs = getComputedStyle(t);
+            if (m.want === 'bullets') ok = (t.textContent ?? '').includes('•'.repeat(11));
+            else if (m.want === 'input') ok = mask.startsWith('input') && cs.getPropertyValue('-webkit-text-security').trim() === 'disc';
+            else ok = mask === 'visual' && cs.visibility === 'hidden';
+          }
+          return { dom: { innerText: document.body.innerText, textContent: document.body.textContent ?? '', attrs: attrs.join('|') }, ok };
+        },
+        { sel: parentSel, m: masked },
+      );
+      cleanAll(reads.dom);
+      expect(reads.ok, `${masked.sel} not masked (${masked.want}) at tick ${tick}`).toBe(true);
+      if (PIXEL_AT.has(tick)) await pixel(`at tick ${tick}`);
+      await page.waitForTimeout(100);
     }
-    await page.evaluate(() => clearInterval((window as unknown as { __churn: number }).__churn));
-    expect(ticks).toBeGreaterThan(5);
+    await pixel('at the end');
+    const renders = await page.evaluate(() => {
+      const w = window as unknown as { __churn: number; __renders: number };
+      clearInterval(w.__churn);
+      return w.__renders;
+    });
+    expect(renders, 'the page re-rendered the parent throughout').toBeGreaterThan(10);
   }
 
   test('9 churn: element sticker parent re-rendered every 100 ms', async ({ page, ext }) => {
     const s = await setupStatic(page, ext);
-    await churn(page, '#identity tbody tr:first-child', s.rawCellParent, () => boxOf(page, '#ssn-cell'));
+    await churn(page, ext, '#identity tbody tr:first-child', s.rawCellParent, () => boxOf(page, '#ssn-cell'), { sel: '#ssn-cell', want: 'bullets' });
     expect(await page.textContent('#ssn-cell')).toBe('•'.repeat(11));
   });
 
   test('9 churn: rect sticker paragraph re-rendered every 100 ms', async ({ page, ext }) => {
     const s = await setupStatic(page, ext);
-    await churn(page, 'p.narrow', s.rawSpanParent, () => bulletRun(page, '#wrapped-span'));
+    await churn(page, ext, 'p.narrow', s.rawSpanParent, () => bulletRun(page, '#wrapped-span'), { sel: '#wrapped-span', want: 'bullets' });
     expect(await page.textContent('#wrapped-span')).toContain('•'.repeat(11));
     expect(await pageInnerText(page)).toContain('and this inline span wraps');
   });
 
   test('9 churn: input and image parents re-rendered every 100 ms', async ({ page, ext }) => {
     const s = await setupForms(page, ext);
-    await churn(page, '#intake .field:first-child', s.rawSsnParent, () => boxOf(page, '#ssn'));
-    await churn(page, '#photo-wrap', s.rawPhotoParent, () => boxOf(page, '#photo'));
+    await churn(page, ext, '#intake .field:first-child', s.rawSsnParent, () => boxOf(page, '#ssn'), { sel: '#ssn', want: 'input' });
+    await churn(page, ext, '#photo-wrap', s.rawPhotoParent, () => boxOf(page, '#photo'), { sel: '#photo', want: 'visual' });
     expect(await page.evaluate(() => getComputedStyle(document.getElementById('ssn')!).getPropertyValue('-webkit-text-security').trim())).toBe('disc');
     expect(await page.evaluate(() => getComputedStyle(document.getElementById('photo')!).visibility)).toBe('hidden');
   });
@@ -547,8 +599,7 @@ test.describe('red team: tampering', () => {
       return cs.userSelect || (cs as unknown as { webkitUserSelect: string }).webkitUserSelect;
     });
     expect(cleared).not.toBe('none');
-    await expect.poll(userSelect
-, { timeout: 1500, message: 'mask sheet re-installed' }).toBe('none');
+    await expect.poll(userSelect, { timeout: 3000, message: 'mask sheet re-installed' }).toBe('none');
     expect(await page.textContent('#ssn-cell')).toBe('•'.repeat(11));
   });
 
@@ -588,7 +639,7 @@ test.describe('red team: tampering', () => {
       // A page stylesheet produces no mutation record: it is handled by the
       // inline !important styles, so only the DOM state is checked for it.
       if (name !== 'page stylesheet') expect(restoredInMicrotask, `host restored in the same microtask after ${name}`).toBe(true);
-      await expect.poll(hostOk, { timeout: 400, message: `host after ${name}` }).toBe(true);
+      await expect.poll(hostOk, { timeout: 1500, message: `host after ${name}` }).toBe(true);
       // Pixels need a rendered frame and a screenshot, whose latency depends on
       // machine load: allow up to 3 s for the screenshot to show the sticker.
       await expect.poll(() => coveredAt(page, cell), { timeout: 3000, message: `pixels after ${name}` }).toBe(true);

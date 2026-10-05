@@ -20,8 +20,9 @@
 </main>
 <script src="/stress/common.js"></script>
 <script>
-  // A web font that arrives 1.5 s after first paint (font-display: swap),
-  // and images without dimensions that load late.
+  // A web font that arrives 1.5 s after the target is first read (so after
+  // the sticker is placed, however long the page took to get there), and
+  // images without dimensions that load late.
   const SECRET = '123-45-6789';
   const { wait, frames, targetFor } = window.__stress;
   async function lateFont(family, src, cls, delay) {
@@ -34,7 +35,12 @@
     document.body.classList.remove('late', 'late2');
     document.body.classList.add(cls);
   }
-  addEventListener('load', () => lateFont('LateFace', 'local("Georgia"), local("Times New Roman")', 'late', 1500));
+  let lateStarted = false;
+  const startLate = () => {
+    if (lateStarted) return;
+    lateStarted = true;
+    lateFont('LateFace', 'local("Georgia"), local("Times New Roman")', 'late', 1500);
+  };
   window.__fx = {
     actions: ['settle', 'late-image', 'font-swap-again', 'spec:reload', 'settle'],
     async run(name) {
@@ -52,7 +58,10 @@
       }
       await frames();
     },
-    target: () => targetFor(document.querySelector('p.ident')),
+    target: () => {
+      startLate();
+      return targetFor(document.querySelector('p.ident'));
+    },
     secrets: () => [SECRET],
     cover: { selector: 'p.ident' },
   };

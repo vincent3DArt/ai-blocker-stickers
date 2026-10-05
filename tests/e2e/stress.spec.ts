@@ -192,6 +192,10 @@ async function runAction(page: Page, action: string) {
 }
 
 async function place(page: Page, ext: Ext, cover: Cover, kind: Kind) {
+  // Wait for the content script to finish booting first: a fixture may start
+  // moving things around once its target is read (late-fonts), and the rect
+  // must be drawn over the target where it is at that moment.
+  await expect.poll(async () => (await sendTo<unknown>(ext, page, cover.frame, { type: 'TEST_STATE' }).catch(() => undefined)) !== undefined, { timeout: 10000 }).toBe(true);
   let t: Target | null = null;
   await expect.poll(async () => (t = await fx<Target | null>(page, 'target').catch(() => null)) !== null, { timeout: 5000 }).toBe(true);
   if (kind === 'element') {

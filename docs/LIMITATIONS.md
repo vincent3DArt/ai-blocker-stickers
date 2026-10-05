@@ -320,6 +320,12 @@ exercise them.
     after a reload and finds the secret readable for 0 ms (before the cloak:
     60 to 200 ms on the fixtures). During that window `textContent`,
     `outerHTML` and the network response still hold the raw text (see 4),
-    and a page element styled `visibility: visible` shows through. Every
-    page of such an origin is painted that much later. If the content
-    script never starts, the cloak lifts itself after 1.5 seconds.
+    and a page element styled `visibility: visible` shows through. An
+    origin is cloaked from the page load after its first sticker until its
+    last one is deleted; a page there with nothing to cover is shown as
+    soon as the content script has read storage, and outside an AI session
+    origins without stickers are never cloaked. If boot throws, the content
+    script lifts the cloak at once; if the script stalls or never runs, the
+    stylesheet lifts itself 1.5 seconds after the first rendered frame,
+    which a hidden page can be late to produce (about 2.4 s in headless
+    Edge on a busy machine).

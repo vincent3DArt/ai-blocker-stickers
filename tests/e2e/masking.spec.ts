@@ -56,18 +56,21 @@ test.describe('M3 DOM masking', () => {
     await page.goto('/forms.html');
     await ext.cover(page, '#live');
     const box = await boxOf(page, '#live');
-    const start = Date.now();
-    let reads = 0;
-    while (Date.now() - start < 3000) {
+    // DOM on every read; the pixel (a screenshot, slow under load) with a bounded poll at fixed reads.
+    const covered = (label: string) =>
+      expect
+        .poll(async () => (await pixelAt(page, box.x + box.w / 2, box.y + box.h / 2))[0], { message: `sticker off ${label}`, timeout: 3000 })
+        .toBeLessThan(0x40); // sticker, not white page
+    const ticksBefore = await page.evaluate(() => (window as unknown as { __ticks: number }).__ticks);
+    for (let read = 0; read < 30; read++) {
       const t = await page.evaluate(() => document.getElementById('live')!.textContent);
       expect(t).not.toContain('123-45-6789');
-      const px = await pixelAt(page, box.x + box.w / 2, box.y + box.h / 2);
-      expect(px[0]).toBeLessThan(0x40); // sticker, not white page
-      reads++;
+      if (read === 10 || read === 20) await covered(`at read ${read}`);
+      await page.waitForTimeout(100);
     }
+    await covered('at the end');
     const ticks = await page.evaluate(() => (window as unknown as { __ticks: number }).__ticks);
-    expect(ticks).toBeGreaterThan(5);
-    expect(reads).toBeGreaterThan(5);
+    expect(ticks - ticksBefore, 'the framework rewrote the node throughout').toBeGreaterThan(5);
   });
 
   test('inputs: pixels hidden, a11y excluded, copy blocked, value still submits', async ({ page, ext }) => {

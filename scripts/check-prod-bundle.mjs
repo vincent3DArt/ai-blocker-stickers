@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Checks the production build for development-only code: test message names,
 // the storage switches that turn auto-lock or scanning off, the fixture
-// origins and the hidden-tab emulation. Builds nothing: run `pnpm build` first.
+// origins, the hidden-tab emulation and the popup demo mode. Builds nothing: run `pnpm build` first.
 //
 // Exits 1 and prints file: identifier x count for every hit. No dependencies.
 
@@ -21,10 +21,14 @@ const DENY = [
   'emulateHidden',
   'aibsEmulateHidden',
   'aibsFailNextSave',
+  'aibsFailBoot',
   'bannerButtons',
   'bannerShown',
   '127.0.0.1:4173',
   'localhost:4173',
+  // Popup demo mode (src/entrypoints/popup/demo.ts).
+  'installDemo',
+  'mail.example.com/inbox',
 ];
 const TEXT = /\.(js|mjs|cjs|json|html|css|map|txt)$/i;
 

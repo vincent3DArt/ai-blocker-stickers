@@ -25,7 +25,8 @@ import { Scanner } from './detect/scanner';
 import { knownCanvasApp, pageRenderingMode, type RenderingMode } from './detect/canvas-detect';
 import { onIdle } from './detect/scheduler';
 import { SuggestView } from './overlay/suggest-view';
-import { setPagePathOverride } from './state/page-path';
+import { pageLoc, pagePath, setPagePathOverride } from './state/page-path';
+import { pathHmacsSync } from './state/scope';
 import type { ViewRect } from '@/shared/types';
 
 /*
@@ -118,7 +119,9 @@ export async function boot(opts: BootOptions = {}): Promise<BootApi | undefined>
   // In an extension page, runtime messages between the popup and the
   // background reach this listener too; answering them would hijack the reply.
   const extensionPage = location.protocol === 'chrome-extension:';
-  if (import.meta.env.DEV) await emulateHiddenTab();
+  // Dev only, read alongside the boot reads below (one round trip, not two):
+  // nothing uses animation frames or visibility before they resolve.
+  const emulating = import.meta.env.DEV ? emulateHiddenTab() : Promise.resolve();
 
   // Register the message listener before any await so messages that arrive
   // during boot are answered once boot completes instead of being dropped.
@@ -147,8 +150,9 @@ export async function boot(opts: BootOptions = {}): Promise<BootApi | undefined>
     chrome.storage.local.get(SESSION_ACTIVE_KEY).catch(() => ({}) as Record<string, unknown>),
     // Folded to the empty object in production: the keys never reach the bundle.
     import.meta.env.DEV
-      ? chrome.storage.local.get(['aibsNoAutoLock', 'aibsNoScan', 'aibsFailNextSave']).catch(() => ({}) as Record<string, unknown>)
+      ? chrome.storage.local.get(['aibsNoAutoLock', 'aibsNoScan', 'aibsFailNextSave', 'aibsFailBoot']).catch(() => ({}) as Record<string, unknown>)
       : Promise.resolve({} as Record<string, unknown>),
+    emulating,
   ]);
   const devNoAutoLock = import.meta.env.DEV && devLocal.aibsNoAutoLock === true;
   const devNoScan = import.meta.env.DEV && devLocal.aibsNoScan === true;
@@ -167,11 +171,19 @@ export async function boot(opts: BootOptions = {}): Promise<BootApi | undefined>
       return realSet(items);
     }) as typeof area.set;
   }
+  // Dev only: fail the way a broken build would, before anything is mounted (cloak failsafe test).
+  if (import.meta.env.DEV && devLocal.aibsFailBoot === true) throw new Error('simulated boot failure (dev)');
   let settings: Settings = settingsLoaded;
-  setFingerprintKey(await importKey(secret), b64Bytes(secret));
-
+  // The host is mounted before the key import so the boot cloak can come off
+  // the moment storage says nothing here needs covering.
   const host = mountHost();
   host.setColor(settings.appearance.color);
+  if (store.all.length === 0) host.markReady();
+  setFingerprintKey(await importKey(secret), b64Bytes(secret));
+  {
+    const hm = pathHmacsSync(pageLoc(), depth);
+    if (hm.path && store.active(pagePath(), depth, hm).length === 0) host.markReady();
+  }
   const isOurs = (n: Node | null) => host.isOurs(n);
 
   const hub = new MutationHub();

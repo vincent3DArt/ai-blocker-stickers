@@ -1,10 +1,11 @@
 import type { ContentToBackground, LockUpdate, SessionInfo } from '@/shared/messages';
-import { listSites } from '@/shared/storage';
-import { DEFAULT_TAB_STATE, type TabState } from '@/shared/types';
+import { listSites, loadSite } from '@/shared/storage';
+import { DEFAULT_TAB_STATE, type SiteRecord, type TabState } from '@/shared/types';
 import { parseOrigin, scriptId } from '@/shared/origin';
 import { AUDIT_KEY, SESSION_ACTIVE_KEY, appendAudit, computeLock, type AuditEntry } from '@/shared/lock';
 
 const CONTENT_SCRIPT = 'content-scripts/content.js';
+const CLOAK_CSS = 'cloak.css';
 const ALL_SITES = '*://*/*';
 /** Script id for the all-sites registration made while an AI session runs. */
 const ALL_SITES_ID = 'aibs-all-sites';
@@ -39,25 +40,47 @@ function fromExtensionUrl(sender: chrome.runtime.MessageSender): boolean {
   return sender.id === chrome.runtime.id && !!sender.url && sender.url.startsWith(chrome.runtime.getURL(''));
 }
 
-async function registerScript(id: string, matches: string[]): Promise<void> {
+async function registerScript(id: string, matches: string[], cloak = false): Promise<void> {
   const existing = await chrome.scripting.getRegisteredContentScripts({ ids: [id] });
   const script: chrome.scripting.RegisteredContentScript = {
     id,
     matches,
     js: [CONTENT_SCRIPT],
-    // The boot cloak (public/cloak.css): applied before the first parse, lifted
-    // by the content script once the stickers are in place.
-    css: ['cloak.css'],
     runAt: 'document_start',
     allFrames: true,
     persistAcrossSessions: true,
   };
-  if (existing.length) await chrome.scripting.updateContentScripts([script]);
+  // The boot cloak (public/cloak.css): applied before the first parse, lifted
+  // by the content script once the stickers are in place. Only origins that
+  // have stickers get it (and every site while an AI session runs, when
+  // anything may be auto-covered); a page with nothing to cover is never hidden.
+  if (cloak) script.css = [CLOAK_CSS];
+  const had = existing[0];
+  if (had && !cloak && had.css?.length) {
+    // An update cannot drop a field: replace the registration.
+    await chrome.scripting.unregisterContentScripts({ ids: [id] });
+    await chrome.scripting.registerContentScripts([script]);
+  } else if (had) await chrome.scripting.updateContentScripts([script]);
   else await chrome.scripting.registerContentScripts([script]);
 }
 
-async function registerOrigin(origin: string): Promise<void> {
-  await registerScript(scriptId(origin), [`${origin}/*`]);
+const hasStickers = (rec: SiteRecord | undefined) => !!rec && rec.v === 1 && Array.isArray(rec.stickers) && rec.stickers.length > 0;
+
+async function registerOrigin(origin: string, rec?: SiteRecord): Promise<void> {
+  const site = rec ?? (await loadSite(origin).catch(() => undefined));
+  await registerScript(scriptId(origin), [`${origin}/*`], hasStickers(site));
+}
+
+/**
+ * A site's first sticker turns the cloak on for its next page load, its last
+ * one turns it off. Only origins that are already registered are touched.
+ */
+async function syncCloak(origin: string, rec: SiteRecord | undefined): Promise<void> {
+  const id = scriptId(origin);
+  const [had] = await chrome.scripting.getRegisteredContentScripts({ ids: [id] });
+  if (!had) return;
+  if (!!had.css?.length === hasStickers(rec)) return;
+  await registerOrigin(origin, rec);
 }
 
 async function unregisterId(id: string): Promise<void> {
@@ -93,7 +116,7 @@ async function reconcile(): Promise<void> {
     const origin = parseOrigin(s.origin);
     if (!origin || !s.enabled) continue;
     if (!(await hasOriginPermission(origin))) continue;
-    await registerOrigin(origin);
+    await registerOrigin(origin, s);
     wanted.add(scriptId(origin));
   }
   if (import.meta.env.DEV) {
@@ -106,7 +129,7 @@ async function reconcile(): Promise<void> {
   }
   const keep = (await chrome.storage.local.get(KEEP_ALL_SITES_KEY))[KEEP_ALL_SITES_KEY] === true;
   if ((lock.session || keep) && (await hasAllSites())) {
-    await registerScript(ALL_SITES_ID, [ALL_SITES]);
+    await registerScript(ALL_SITES_ID, [ALL_SITES], true);
     wanted.add(ALL_SITES_ID);
   }
   const registered = await chrome.scripting.getRegisteredContentScripts();
@@ -276,7 +299,7 @@ async function startSession(allSites: boolean): Promise<void> {
   canvasAudited.clear();
   await chrome.storage.session.set({ [SESSION_KEY]: { active: true, startedAt: lock.startedAt } });
   await chrome.storage.local.set({ [SESSION_ACTIVE_KEY]: true });
-  if (allSites && (await hasAllSites())) await registerScript(ALL_SITES_ID, [ALL_SITES]).catch(() => {});
+  if (allSites && (await hasAllSites())) await registerScript(ALL_SITES_ID, [ALL_SITES], true).catch(() => {});
   await audit({ action: 'session-start' });
   await pushLockAll();
   void ensurePolling();
@@ -447,6 +470,15 @@ export default defineBackground(() => {
       }
       const origin = parseOrigin(pattern.replace(/\/\*$/, ''));
       if (origin) await unregisterOrigin(origin);
+    }
+  });
+
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== 'local') return;
+    for (const [key, change] of Object.entries(changes)) {
+      if (!key.startsWith('site:')) continue;
+      const origin = parseOrigin(key.slice('site:'.length));
+      if (origin) void syncCloak(origin, change.newValue as SiteRecord | undefined).catch(() => {});
     }
   });
 
