@@ -1,4 +1,4 @@
-import type { SiteRecord, Sticker } from '@/shared/types';
+import { MAX_CUSTOM_DETECTORS, cleanDetectors, type CustomDetector, type SiteRecord, type Sticker } from '@/shared/types';
 import { cleanDismissed, loadSite, saveSite, siteKey } from '@/shared/storage';
 import { frameApplies, scopeApplies, type PathHmacs } from '@/shared/url-match';
 
@@ -141,6 +141,28 @@ export class SiteStore {
     const list = this.record.dismissedSuggestions ?? [];
     if (list.includes(hmac)) return;
     this.record = { ...this.record, dismissedSuggestions: cleanDismissed([...list, hmac]) };
+    this.scheduleSave();
+  }
+
+  // ---- custom detectors (scope: this site) ----
+
+  get customDetectors(): CustomDetector[] {
+    return this.record.customDetectors ?? [];
+  }
+
+  /** Adds (or replaces, by id) a site-scoped detector. Refuses past the cap. */
+  addDetector(d: CustomDetector): boolean {
+    const list = this.customDetectors.filter((x) => x.id !== d.id);
+    if (list.length >= MAX_CUSTOM_DETECTORS) return false;
+    this.record = { ...this.record, customDetectors: cleanDetectors([...list, { ...d, scope: 'site', origin: this.origin }], 'site') };
+    this.scheduleSave();
+    return true;
+  }
+
+  removeDetector(id: string) {
+    const list = this.customDetectors;
+    if (!list.some((d) => d.id === id)) return;
+    this.record = { ...this.record, customDetectors: list.filter((d) => d.id !== id) };
     this.scheduleSave();
   }
 

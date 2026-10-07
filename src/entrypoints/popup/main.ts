@@ -1,7 +1,10 @@
 import './popup.css';
-import type { GetStickersResponse, GetSuggestionsResponse, SessionInfo, StickerSummary } from '@/shared/messages';
-import type { ScanSensitivity, Settings, StrictInputsMode, TabState } from '@/shared/types';
-import { loadSettings, loadSite, saveSettings, saveSite } from '@/shared/storage';
+import type { GetStickersResponse, GetSuggestionsResponse, PreviewPatternResponse, SessionInfo, StickerSummary } from '@/shared/messages';
+import { MAX_CUSTOM_DETECTORS, type CustomDetector, type DetectorStrength, type ScanSensitivity, type Settings, type SiteRecord, type StrictInputsMode, type TabState } from '@/shared/types';
+import { assertNoCoveredText, loadSettings, loadSite, saveSettings, saveSite } from '@/shared/storage';
+import { CATALOG, catalogOn, findCatalog, type CatalogEntry } from '@/content/detect/catalog';
+import { checkRegex, templateToRegex } from '@/content/detect/template';
+import { normalizeLabelWords } from '@/content/detect/derive';
 import { defaultPathPattern, prefixPathPattern, sanitizePathPattern } from '@/shared/url-match';
 import { AUDIT_KEY, isAuditEntry, lockMessage, type AuditEntry } from '@/shared/lock';
 import { icon, type IconName } from '@/shared/icons';
@@ -287,7 +290,7 @@ function segmented<T extends string>(
  * disabled while locked (the content script also defers any downgrade until
  * the lock ends).
  */
-function settingsSection(settings: Settings, locked: boolean): HTMLElement {
+function settingsSection(settings: Settings, locked: boolean, origin: string | null = null, site?: SiteRecord, invalid: ReadonlySet<string> = new Set()): HTMLElement {
   const lockedTitle = locked ? 'Locked: change settings after the AI session ends' : '';
   const box = h('fieldset', { disabled: locked, title: lockedTitle });
   box.append(
@@ -315,7 +318,7 @@ function settingsSection(settings: Settings, locked: boolean): HTMLElement {
       await saveSettings({ ...cur, scanSensitivity: v });
     }),
   );
-  return disclosure('settings', 'settings', 'Settings', box, scan, pdfSettingsFieldset());
+  return disclosure('settings', 'settings', 'Settings', box, scan, detectorsFieldset(settings, origin, site, invalid, locked), pdfSettingsFieldset());
 }
 
 const CANVAS_NOTE =
@@ -339,7 +342,7 @@ async function scanEnabledFor(origin: string, settings: Settings): Promise<boole
  * Suggestions waiting on this page: count, Cover all, Review, and the per-site switch.
  * On a canvas-drawn page the count is replaced by an explanation and the switch is disabled.
  */
-function suggestionsSection(tabId: number, origin: string, enabled: boolean, canvas: boolean, res: GetSuggestionsResponse | null): HTMLElement {
+function suggestionsSection(tabId: number, origin: string, enabled: boolean, canvas: boolean, res: GetSuggestionsResponse | null, settings: Settings): HTMLElement {
   const box = h('section', { class: 'suggest' });
   const n = res?.suggestions.length ?? 0;
   if (canvas && n === 0) {
@@ -364,6 +367,8 @@ function suggestionsSection(tabId: number, origin: string, enabled: boolean, can
       );
     }
     box.append(row);
+    if (res.budgetExceeded) box.append(notice('warn', 'Custom patterns used up their 2 s time budget on this page and stopped matching.', { id: 'budget-note' }));
+    if (!n && !res.scanning) box.append(teachSection(tabId, origin, settings));
   }
   box.append(
     toggle(
@@ -383,6 +388,291 @@ function suggestionsSection(tabId: number, origin: string, enabled: boolean, can
   );
   return box;
 }
+
+// ==== Teach a pattern (begin) ====
+// Custom detectors: "Pick from a list" (the catalogue), "Type a format" (a
+// template or a regular expression, previewed on the page), "Select an
+// example on the page" (the in-page panel). Only derived shapes are stored.
+
+const blankSite = (origin: string): SiteRecord => ({ v: 1, origin, enabled: true, stickers: [], updatedAt: 0 });
+
+async function setCatalog(id: string, on: boolean) {
+  const cur = await loadSettings();
+  await saveSettings({ ...cur, catalog: { ...(cur.catalog ?? {}), [id]: on } });
+}
+
+/** Store a new detector in the global list or the site record. Throws on the privacy guard or the cap. */
+async function addDetector(origin: string, d: CustomDetector) {
+  assertNoCoveredText(d);
+  if (d.scope === 'global') {
+    const cur = await loadSettings();
+    const list = cur.customDetectors ?? [];
+    if (list.length >= MAX_CUSTOM_DETECTORS) throw new Error(`At most ${MAX_CUSTOM_DETECTORS} patterns for all sites.`);
+    await saveSettings({ ...cur, customDetectors: [...list, { ...d, origin: undefined }] });
+  } else {
+    const rec = (await loadSite(origin)) ?? blankSite(origin);
+    const list = rec.customDetectors ?? [];
+    if (list.length >= MAX_CUSTOM_DETECTORS) throw new Error(`At most ${MAX_CUSTOM_DETECTORS} patterns per site.`);
+    await saveSite({ ...rec, customDetectors: [...list, { ...d, origin }], updatedAt: Date.now() });
+  }
+}
+
+/** Replace `d` by `next` (same id), moving it between the site and the global list when the scope changed. */
+async function updateDetector(origin: string, d: CustomDetector, next: CustomDetector) {
+  assertNoCoveredText(next);
+  if (next.scope === d.scope) {
+    if (d.scope === 'global') {
+      const cur = await loadSettings();
+      await saveSettings({ ...cur, customDetectors: (cur.customDetectors ?? []).map((x) => (x.id === d.id ? next : x)) });
+    } else {
+      const rec = await loadSite(origin);
+      if (!rec) return;
+      await saveSite({ ...rec, customDetectors: (rec.customDetectors ?? []).map((x) => (x.id === d.id ? next : x)), updatedAt: Date.now() });
+    }
+    return;
+  }
+  await addDetector(origin, next);
+  await removeDetector(origin, d);
+}
+
+/** Remove a detector from wherever it is stored. */
+async function removeDetector(origin: string, d: CustomDetector) {
+  if (d.scope === 'global') {
+    const cur = await loadSettings();
+    await saveSettings({ ...cur, customDetectors: (cur.customDetectors ?? []).filter((x) => x.id !== d.id) });
+  } else {
+    const rec = await loadSite(origin);
+    if (!rec) return;
+    await saveSite({ ...rec, customDetectors: (rec.customDetectors ?? []).filter((x) => x.id !== d.id), updatedAt: Date.now() });
+  }
+}
+
+const labelList = (text: string) =>
+  text
+    .split(',')
+    .map((l) => normalizeLabelWords(l))
+    .filter(Boolean)
+    .slice(0, 8);
+
+function catalogList(settings: Settings, entries: readonly CatalogEntry[], locked: boolean): HTMLElement {
+  const ul = h('ul', { class: 'list catalog' });
+  for (const e of entries) {
+    const input = h('input', {
+      checked: catalogOn(e, settings.catalog),
+      disabled: locked,
+      onchange: async (ev: Event) => {
+        await setCatalog(e.id, (ev.target as HTMLInputElement).checked);
+      },
+    });
+    input.dataset.catalog = e.id;
+    ul.append(h('li', {}, h('div', { class: 'cat-text' }, h('span', { class: 'name' }, e.name), h('span', { class: 'explain' }, e.description)), toggle(input, '', { class: 'cat-toggle', title: e.name })));
+  }
+  if (!entries.length) ul.append(h('li', { class: 'empty muted' }, 'Nothing matches. Try "phone", "license" or "insurance".'));
+  return ul;
+}
+
+function pickFromList(settings: Settings): HTMLElement {
+  const box = h('div', { class: 'teach-pane' });
+  const results = h('div', {});
+  const search = h('input', {
+    type: 'search',
+    id: 'catalog-search',
+    placeholder: 'What should be covered? e.g. driver license',
+    oninput: () => results.replaceChildren(catalogList(settings, findCatalog(search.value), false)),
+  });
+  results.append(catalogList(settings, findCatalog(''), false));
+  box.append(search, results);
+  return box;
+}
+
+function typeFormat(tabId: number, origin: string): HTMLElement {
+  const box = h('div', { class: 'teach-pane' });
+  const format = h('input', { type: 'text', id: 'format-input', placeholder: 'AA-####-####', spellcheck: false, autocomplete: 'off' });
+  const isRegex = h('input', { id: 'format-regex' });
+  const strength = h('select', { id: 'format-strength', hidden: true }, h('option', { value: 'medium' }, 'Needs a label nearby'), h('option', { value: 'low' }, 'Only right next to its label'), h('option', { value: 'high' }, 'Anywhere'));
+  const labels = h('input', { type: 'text', id: 'format-labels', placeholder: 'Labels, comma separated (e.g. policy, member id)', autocomplete: 'off' });
+  const name = h('input', { type: 'text', id: 'format-name', placeholder: 'Name, e.g. Policy number', maxLength: 40, autocomplete: 'off' });
+  const scope = h('select', { id: 'format-scope' }, h('option', { value: 'site' }, 'This site'), h('option', { value: 'global' }, 'All sites'));
+  const preview = h('p', { class: 'explain preview', id: 'format-preview' }, 'Type a format: # digit, A letter, a lowercase letter, X letter or digit, ? any character, * repeats.');
+  const save = h('button', { class: 'primary small', id: 'format-save', disabled: true }, 'Save pattern');
+  let current: { regex: string; strength: DetectorStrength; source: 'template' | 'regex' } | null = null;
+  let seq = 0;
+  const update = async () => {
+    const my = ++seq;
+    strength.hidden = !isRegex.checked;
+    current = null;
+    save.disabled = true;
+    const text = format.value.trim();
+    if (!text) {
+      preview.textContent = isRegex.checked
+        ? 'Type a regular expression. Use \\d for digits: literal digits are refused.'
+        : 'Type a format: # digit, A letter, a lowercase letter, X letter or digit, ? any character, * repeats.';
+      return;
+    }
+    let regex: string;
+    let desc: string;
+    let st: DetectorStrength;
+    if (isRegex.checked) {
+      const chk = checkRegex(text);
+      if (!chk.ok) {
+        preview.textContent = chk.error;
+        return;
+      }
+      regex = text;
+      desc = 'Custom pattern';
+      st = strength.value as DetectorStrength;
+    } else {
+      const t = templateToRegex(text);
+      if (!t.ok) {
+        preview.textContent = t.error;
+        return;
+      }
+      regex = t.regex;
+      desc = t.description;
+      st = t.strength;
+    }
+    preview.textContent = `${desc}. Counting on this page…`;
+    let count: number | undefined;
+    try {
+      const r = (await chrome.tabs.sendMessage(tabId, { type: 'PREVIEW_PATTERN', regex, strength: st, labels: labelList(labels.value) }, { frameId: 0 })) as PreviewPatternResponse | undefined;
+      if (r && !r.ok) {
+        if (my === seq) preview.textContent = r.error ?? 'Invalid pattern.';
+        return;
+      }
+      count = r?.count;
+    } catch {
+      count = undefined;
+    }
+    if (my !== seq) return;
+    preview.textContent = `${desc}. ${count === undefined ? 'Could not count on this page.' : `${count} match${count === 1 ? '' : 'es'} on this page.`}`;
+    current = { regex, strength: st, source: isRegex.checked ? 'regex' : 'template' };
+    save.disabled = false;
+  };
+  let timer = 0;
+  const later = () => {
+    clearTimeout(timer);
+    timer = window.setTimeout(() => void update(), 200);
+  };
+  format.addEventListener('input', later);
+  labels.addEventListener('input', later);
+  isRegex.addEventListener('change', later);
+  strength.addEventListener('change', later);
+  save.onclick = async () => {
+    if (!current) return;
+    const d: CustomDetector = {
+      id: crypto.randomUUID(),
+      name: name.value.replace(/\s+/g, ' ').trim().slice(0, 40) || 'Custom pattern',
+      source: current.source,
+      regex: current.regex,
+      labels: labelList(labels.value),
+      strength: current.strength,
+      scope: scope.value === 'global' ? 'global' : 'site',
+      createdAt: Date.now(),
+    };
+    try {
+      await addDetector(origin, d);
+    } catch (e) {
+      preview.textContent = `Not saved: ${e instanceof Error && /Privacy/.test(e.message) ? 'the name or labels look like sensitive data' : (e as Error).message}`;
+      return;
+    }
+    preview.textContent = 'Saved. Matches on this page are now suggested.';
+    format.value = '';
+    save.disabled = true;
+    setTimeout(render, 400);
+  };
+  box.append(
+    format,
+    toggle(isRegex, 'Regular expression'),
+    strength,
+    labels,
+    h('div', { class: 'row' }, name, scope),
+    preview,
+    save,
+  );
+  return box;
+}
+
+/** "Teach a pattern": shown when the page has no suggestions. */
+function teachSection(tabId: number, origin: string, settings: Settings): HTMLElement {
+  const box = h('div', { class: 'teach', id: 'teach' });
+  const pane = h('div', {});
+  const choose = (which: 'list' | 'format') => () => {
+    for (const b of Array.from(box.querySelectorAll('.teach-opts button'))) b.classList.toggle('active', (b as HTMLElement).dataset.which === which);
+    pane.replaceChildren(which === 'list' ? pickFromList(settings) : typeFormat(tabId, origin));
+  };
+  const opt = (which: string, ic: IconName, text: string, onclick: () => void) => {
+    const b = h('button', { class: 'ghost small', id: `teach-${which}`, onclick }, icon(ic, 14), text);
+    b.dataset.which = which;
+    return b;
+  };
+  box.append(
+    h('div', { class: 'teach-head' }, icon('sparkle', 14), h('strong', {}, 'Teach a pattern')),
+    h(
+      'div',
+      { class: 'teach-opts' },
+      opt('list', 'layers', 'Pick from a list', choose('list')),
+      opt('format', 'pencil', 'Type a format', choose('format')),
+      opt('example', 'textSelect', 'Select an example on the page', async () => {
+        const res = await chrome.tabs.sendMessage(tabId, { type: 'START_TEACH' }, { frameId: 0 }).catch(() => undefined);
+        if (showRefusal(res)) window.close();
+      }),
+    ),
+    pane,
+  );
+  return box;
+}
+
+/** Settings → Detectors: the built-ins (and catalogue additions that are on), and the custom ones. */
+function detectorsFieldset(settings: Settings, origin: string | null, site: SiteRecord | undefined, invalid: ReadonlySet<string>, locked: boolean): HTMLElement {
+  const box = h('fieldset', { disabled: locked, id: 'detectors', title: locked ? 'Locked: change detectors after the AI session ends' : '' });
+  const shown = CATALOG.filter((e) => e.builtin || catalogOn(e, settings.catalog));
+  box.append(h('legend', {}, 'Detectors'), catalogList(settings, shown, locked));
+  const custom: CustomDetector[] = [...(settings.customDetectors ?? []), ...(site?.customDetectors ?? [])];
+  const ul = h('ul', { class: 'list custom', id: 'custom-detectors' });
+  if (!custom.length) ul.append(h('li', { class: 'empty muted' }, 'No patterns taught yet. Use "Teach a pattern" when a page has no suggestions.'));
+  for (const d of custom) {
+    const bad = invalid.has(d.id) || !checkRegex(d.regex, d.flags ?? '').ok;
+    const name = h('input', {
+      type: 'text',
+      class: 'det-name',
+      value: d.name,
+      maxLength: 40,
+      onchange: async () => {
+        const n = name.value.replace(/\s+/g, ' ').trim().slice(0, 40);
+        if (!n || n === d.name) return;
+        await updateDetector(origin ?? '', d, { ...d, name: n }).catch(() => (name.value = d.name));
+      },
+    });
+    name.setAttribute('aria-label', 'Pattern name');
+    const sel = h('select', { class: 'scope det-scope', disabled: !origin && d.scope === 'global' }, h('option', { value: 'site' }, 'This site'), h('option', { value: 'global' }, 'All sites'));
+    sel.value = d.scope;
+    sel.onchange = async () => {
+      if (!origin) return;
+      const scope = sel.value === 'global' ? 'global' : 'site';
+      await updateDetector(origin, d, { ...d, scope }).catch(() => undefined);
+      render();
+    };
+    const del = h(
+      'button',
+      {
+        class: 'icon-btn danger det-delete',
+        tip: 'Delete pattern',
+        onclick: async () => {
+          await removeDetector(origin ?? '', d);
+          render();
+        },
+      },
+      icon('trash'),
+    );
+    del.setAttribute('aria-label', 'Delete pattern');
+    const li = h('li', {}, name, bad ? h('span', { class: 'badge bad', title: 'This pattern is invalid or unsafe and is skipped' }, 'invalid') : null, sel, del);
+    li.dataset.id = d.id;
+    ul.append(li);
+  }
+  box.append(h('span', { class: 'explain' }, 'Switching a built-in off hides its suggestions; during an AI session every built-in still auto-covers.'), ul);
+  return box;
+}
+// ==== Teach a pattern (end) ====
 
 function tile(id: string, ic: IconName, label: string, opts: { disabled?: boolean; tip?: string; primary?: boolean; count?: string; onclick: () => void }): HTMLButtonElement {
   const b = h(
@@ -405,8 +695,10 @@ async function render() {
   view.append(head.el, pdfOpenSection(tab));
   let tabLocked = false;
   let autoCount = 0;
+  let invalid: ReadonlySet<string> = new Set();
+  const site = origin ? await loadSite(origin).catch(() => undefined) : undefined;
   const finish = () => {
-    view.append(sessionSection(session, autoCount), settingsSection(settings, tabLocked || session?.active === true), audit);
+    view.append(sessionSection(session, autoCount), settingsSection(settings, tabLocked || session?.active === true, origin, site, invalid), audit);
     app.replaceChildren(view);
   };
 
@@ -497,6 +789,7 @@ async function render() {
   const sugg = locked ? null : await fetchSuggestions(tabId);
   const n = sugg?.suggestions.length ?? 0;
   const more = (sugg?.total ?? 0) > n ? '+' : '';
+  invalid = new Set(sugg?.invalidDetectors ?? []);
 
   const run = (msg: Record<string, unknown>) => async () => {
     const res = await chrome.tabs.sendMessage(tabId, msg, { frameId: 0 });
@@ -555,7 +848,7 @@ async function render() {
   );
   editBtn.classList.add('tip-left');
 
-  if (!locked) view.append(suggestionsSection(tabId, origin, scanOn, canvas, sugg));
+  if (!locked) view.append(suggestionsSection(tabId, origin, scanOn, canvas, sugg, settings));
   else if (canvas) view.append(notice('info', CANVAS_NOTE, { class: 'canvas-note', id: 'canvas-note' }));
   if (state.rendering === 'mixed') view.append(notice('info', MIXED_NOTE, { id: 'mixed-note' }));
 

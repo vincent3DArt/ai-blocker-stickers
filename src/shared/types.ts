@@ -274,6 +274,78 @@ export interface SiteRecord {
    * of pattern + element path + label. Never the matched text.
    */
   dismissedSuggestions?: string[];
+  /** Detectors the user taught for this site only (`scope: 'site'`). */
+  customDetectors?: CustomDetector[];
+}
+
+/**
+ * A user-defined detector ("teach a pattern"). Only the derived SHAPE is
+ * stored: a regular expression source, label keywords, a name and a scope.
+ * Never the example it was derived from (content/detect/derive.ts).
+ */
+export type DetectorSource = 'example' | 'catalog' | 'template' | 'regex';
+export type DetectorStrength = 'high' | 'medium' | 'low';
+
+export interface CustomDetector {
+  id: string;
+  name: string;
+  source: DetectorSource;
+  /** Regular expression source (checked by content/detect/template.ts `checkRegex`). */
+  regex: string;
+  /** `i` and/or `u`; `g` is added at run time. */
+  flags?: string;
+  /** Normalised label keywords (lowercase words, no digits). */
+  labels: string[];
+  strength: DetectorStrength;
+  scope: 'site' | 'global';
+  /** Site-scoped detectors: the origin they belong to. */
+  origin?: string;
+  createdAt: number;
+}
+
+/** Per store (the global list in Settings, each site's list): at most this many. */
+export const MAX_CUSTOM_DETECTORS = 50;
+export const DETECTOR_NAME_MAX = 40;
+const DETECTOR_REGEX_MAX = 200;
+
+/**
+ * Structural clean-up of a stored detector list: known fields only, bounded
+ * sizes, newest `MAX_CUSTOM_DETECTORS` kept. Regex safety is checked where the
+ * regex is compiled (content/detect/custom.ts), not here.
+ */
+export function cleanDetectors(list: unknown, scope: 'site' | 'global'): CustomDetector[] {
+  if (!Array.isArray(list)) return [];
+  const out: CustomDetector[] = [];
+  const seen = new Set<string>();
+  for (const raw of list) {
+    if (!raw || typeof raw !== 'object') continue;
+    const d = raw as Partial<CustomDetector>;
+    if (typeof d.id !== 'string' || !/^[\w-]{1,64}$/.test(d.id) || seen.has(d.id)) continue;
+    if (typeof d.regex !== 'string' || !d.regex || d.regex.length > DETECTOR_REGEX_MAX) continue;
+    const flags = typeof d.flags === 'string' && /^[iu]{0,2}$/.test(d.flags) ? d.flags : undefined;
+    const strength: DetectorStrength = d.strength === 'high' || d.strength === 'medium' ? d.strength : 'low';
+    const source: DetectorSource = d.source === 'catalog' || d.source === 'template' || d.source === 'regex' ? d.source : 'example';
+    const labels = (Array.isArray(d.labels) ? d.labels : [])
+      .filter((l): l is string => typeof l === 'string')
+      .map((l) => l.toLowerCase().replace(/[^\p{L}\s]/gu, ' ').replace(/\s+/g, ' ').trim().slice(0, 40))
+      .filter(Boolean)
+      .slice(0, 8);
+    const name = (typeof d.name === 'string' ? d.name : '').replace(/\s+/g, ' ').trim().slice(0, DETECTOR_NAME_MAX) || 'Custom pattern';
+    seen.add(d.id);
+    out.push({
+      id: d.id,
+      name,
+      source,
+      regex: d.regex,
+      ...(flags ? { flags } : {}),
+      labels,
+      strength,
+      scope,
+      ...(scope === 'site' && typeof d.origin === 'string' ? { origin: d.origin } : {}),
+      createdAt: typeof d.createdAt === 'number' && Number.isFinite(d.createdAt) ? d.createdAt : 0,
+    });
+  }
+  return out.length > MAX_CUSTOM_DETECTORS ? out.slice(out.length - MAX_CUSTOM_DETECTORS) : out;
 }
 
 /** Auto-suggest sensitivity (see `accepts` in content/detect/patterns.ts). */
@@ -311,6 +383,10 @@ export interface Settings {
   /** Auto-suggest on sites that have no per-site choice yet. */
   scanDefault: boolean;
   scanSensitivity: ScanSensitivity;
+  /** Detectors the user taught for every site (`scope: 'global'`). */
+  customDetectors?: CustomDetector[];
+  /** Catalogue toggles by entry id (content/detect/catalog.ts); absent: the entry's default. */
+  catalog?: Record<string, boolean>;
 }
 
 export type StrictInputsMode = 'locked' | 'always' | 'never';
@@ -349,7 +425,18 @@ export function normalizeSettings(s: Partial<Settings> | undefined | null): Sett
     scanSensitivity: SCAN_SENSITIVITIES.includes(src.scanSensitivity as ScanSensitivity)
       ? (src.scanSensitivity as ScanSensitivity)
       : DEFAULT_SETTINGS.scanSensitivity,
+    customDetectors: cleanDetectors(src.customDetectors, 'global'),
+    catalog: cleanCatalog(src.catalog),
   };
+}
+
+function cleanCatalog(raw: unknown): Record<string, boolean> {
+  const out: Record<string, boolean> = {};
+  if (!raw || typeof raw !== 'object') return out;
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (/^[a-z0-9-]{1,40}$/.test(k) && typeof v === 'boolean') out[k] = v;
+  }
+  return out;
 }
 
 import type { LockReason } from './lock';

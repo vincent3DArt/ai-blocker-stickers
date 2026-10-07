@@ -318,3 +318,27 @@ ul.audit li time { color: var(--text); font-variant-numeric: tabular-nums; margi
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; }
 }
+
+/* ---- Teach a pattern ---- */
+.teach { display: flex; flex-direction: column; gap: 8px; padding: 10px; border: 1px dashed var(--border-strong); border-radius: 10px; }
+.teach-head { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+.teach-head .icon { color: var(--warn); }
+.teach-opts { display: flex; flex-direction: column; gap: 2px; }
+.teach-opts button { justify-content: flex-start; gap: 6px; }
+.teach-opts button.active { background: var(--accent-soft); color: var(--accent-text); }
+.teach-pane { display: flex; flex-direction: column; gap: 6px; }
+.teach-pane input[type='text'], .teach-pane input[type='search'], .teach-pane select, input.det-name {
+  font: inherit; font-size: 12px; color: var(--text); background: var(--bg);
+  border: 1px solid var(--border-strong); border-radius: 7px; padding: 5px 8px; min-width: 0;
+}
+.teach-pane .row { display: flex; gap: 6px; }
+.teach-pane .row input { flex: 1; }
+.teach-pane .preview { min-height: 1.3em; }
+ul.list.catalog { max-height: 220px; overflow: auto; }
+ul.list.catalog li { align-items: center; }
+.cat-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.cat-text .name { font-size: 12px; font-weight: 550; }
+.cat-toggle span:last-child:empty { display: none; }
+ul.list.custom li { gap: 6px; }
+input.det-name { flex: 1; }
+.badge.bad { font-size: 10px; font-weight: 700; text-transform: uppercase; color: var(--danger); background: var(--danger-soft); border-radius: 999px; padding: 1px 6px; }

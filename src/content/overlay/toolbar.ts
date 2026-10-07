@@ -1,7 +1,7 @@
 import type { OverlayHost } from './host';
 import { icon, type IconName } from '@/shared/icons';
 
-export type ToolbarAction = 'pick' | 'rect' | 'selection' | 'suggestions' | 'done';
+export type ToolbarAction = 'pick' | 'rect' | 'selection' | 'teach' | 'suggestions' | 'done';
 
 export interface ToolbarCallbacks {
   onAction(action: ToolbarAction): void;
@@ -81,6 +81,10 @@ export class Toolbar {
     add('pick', 'Cover element', 'sticker');
     add('rect', 'Draw rectangle', 'rect');
     add('selection', 'Cover selection', 'textSelect');
+    add('teach', 'Cover things like this…', 'sparkle');
+    // Clicking a toolbar button must not drop the page selection it acts on.
+    this.buttons.get('teach')!.addEventListener('mousedown', (e) => e.preventDefault());
+    this.buttons.get('selection')!.addEventListener('mousedown', (e) => e.preventDefault());
     this.suggestLabel = add('suggestions', 'Suggestions', 'sparkle');
     this.suggestCount = document.createElement('span');
     this.suggestCount.className = 'count';

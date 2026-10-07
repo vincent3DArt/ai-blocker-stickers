@@ -200,6 +200,43 @@ only. When you end the session, the popup asks "Keep N auto-covered stickers?". 
 stores them like any other sticker; Cancel removes them once the lock is off. The popup lists them
 as "Auto-covered" in the meantime.
 
+**Teach a pattern.** When the built-in formats miss something (policy numbers, member ids, an
+internal case number), teach the extension its shape. When a page has no suggestions, the popup's
+Suggestions area offers three ways:
+
+- *Select an example on the page.* Select one identifier and choose **Cover things like this…**
+  from the edit-mode toolbar or the right-click menu (or start from the popup and then select). A
+  small panel shows the shape it derived ("2 letters, 4 digits, 4 digits"), the label it found next
+  to the example ("policy"), and how many elements on this page match. Pick This site or All sites,
+  adjust the name, and Save.
+- *Type a format.* `#` is a digit, `A` an uppercase letter, `a` a lowercase letter, `X` a letter or
+  digit, `?` any character, `*` repeats the previous class, `\` makes the next character literal.
+  `AA-####-####` matches `PX-2291-4471`. A digit typed in a format stands for any digit. The popup
+  previews the match count on the current page. A **Regular expression** switch takes a raw pattern
+  instead. It must be short and compile, it must not match empty text, and it may not hold
+  backreferences, nested or repeated-alternation quantifiers, or four literal digits in a row.
+- *Pick from a list.* Search the catalogue ("insurance policy numbers", "driver license") and switch
+  entries on. Besides the built-ins it has US and international phone numbers, email addresses,
+  dates of birth in other formats, US street addresses, ZIP+4, US passports, the driver's licence
+  formats of the ten most populous states, insurance policy/group/member numbers, medical record
+  numbers, case/claim/docket numbers and VINs (check digit verified). Only the built-ins are on by
+  default. Parcel tracking numbers never match a catalogue entry.
+
+Taught patterns go through the same scoring as the built-ins. A shape with a separator and at least
+nine characters is strong and suggested on its own. Mixed or longer shapes need a nearby label (the
+one found next to your example). Short digit-only or letter-only shapes need the label right next
+to them. Matches become suggestions, and during an AI session they are auto-covered like any other
+detection, before the first paint on reload. **Settings → Detectors** lists the built-ins (switch
+one off to stop its suggestions; locked tabs still auto-cover with all of them) and your patterns
+(rename, change scope, delete). A pattern that fails to compile is skipped and marked "invalid".
+Teaching, editing and deleting are refused while a tab is locked.
+
+*Privacy:* only the shape is stored, never the example. The selected text is read in memory,
+reduced to classes and lengths (`\b[A-Z]{2}-\d{4}-\d{4}\b`), and dropped. What gets saved is that
+regular expression, the label words (lowercase, digits removed), the name, the strength and the
+scope. Every saved pattern passes the same privacy guard as stickers. Nothing is sent anywhere, and
+no model is involved.
+
 **Scope.** Each sticker is scoped to a URL path pattern or to one exact page. Record ids are
 generalised by default, so `/clients/123` becomes `/clients/*`. A path that names a document (a
 Google Drive/Docs id, a UUID, long hex) or a known document host (Drive, Docs, SharePoint, Dropbox,

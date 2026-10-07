@@ -22,6 +22,7 @@ import { isStableId } from '../anchor/selector';
 import { normalizeContext } from '../anchor/context';
 import { BlockWalker, SKIP_TAGS, allBlocks, nearestBlock, ownBlock, rangesFor, targetFor, type Block } from './block-text';
 import {
+  DETECTORS,
   DETECTOR_BY_ID,
   HIGH_IDS,
   STRENGTH_POINTS,
@@ -33,10 +34,14 @@ import {
 } from './patterns';
 import { hasKind, inputKinds, labelFor, labelKinds, resetLabelCache, type LabelKind } from './labels';
 import { IdleJob, ViewportOrder, onIdle } from './scheduler';
+import { budgetSpent, findUserMatches, newBudget, type LabelTest, type UserBudget, type UserDetector } from './custom';
 
 export interface Hit {
   el: Element;
-  pattern: PatternId;
+  /** A built-in PatternId, or `custom:<id>` / `catalog:<id>` for user-defined detectors. */
+  pattern: string;
+  /** Chip text: never the matched text. */
+  name: string;
   strength: Strength;
   /** Label evidence: 3 same element, 2 adjacent label, 1 same block, 0 none. */
   bonus: number;
@@ -57,6 +62,18 @@ export interface DetectOptions {
   ids?: ReadonlySet<PatternId>;
   /** Elements that must not be reported (our overlay, already masked content). */
   exclude?: (el: Element) => boolean;
+  /** User-defined detectors (custom.ts), scored like the built-ins. */
+  user?: readonly UserDetector[];
+  /** Time budget the user detectors are charged to. */
+  budget?: UserBudget;
+}
+
+/** Whether a block is worth matching at all: four digits for the built-ins, less for user detectors. */
+export function worthScanning(text: string, user?: readonly UserDetector[]): boolean {
+  if (hasDigits(text)) return true;
+  if (!user?.length) return false;
+  if (user.some((d) => !d.needsDigit)) return /\S/.test(text);
+  return /\d/.test(text);
 }
 
 // ---- pure detection over the DOM ----
@@ -82,27 +99,53 @@ function inHref(el: Element, text: string): boolean {
 }
 
 /** Label evidence for a match: the strongest of same element, adjacent label, same block. */
-export function labelBonus(block: Block, start: number, end: number, target: Element, kinds: readonly LabelKind[]): number {
+export function labelBonus(block: Block, start: number, end: number, target: Element, kinds: readonly LabelKind[] | LabelTest): number {
+  const test: LabelTest = typeof kinds === 'function' ? kinds : (t) => hasKind(labelKinds(t), kinds);
   const len = end - start;
   const own = target === block.el ? block.text : (target.textContent ?? '');
   if (own.length <= 3 * len + 40) {
     const rest = own.replace(block.text.slice(start, end), ' ');
-    if (hasKind(labelKinds(rest), kinds)) return 3;
+    if (test(rest)) return 3;
   }
-  if (hasKind(inputKinds(target), kinds)) return 3;
-  if (hasKind(labelKinds(labelFor(target)), kinds)) return 2;
-  if (target !== block.el && hasKind(labelKinds(labelFor(block.el)), kinds)) return 2;
+  if (typeof kinds === 'function' ? attrText(target).some(test) : hasKind(inputKinds(target), kinds)) return 3;
+  if (test(labelFor(target))) return 2;
+  if (target !== block.el && test(labelFor(block.el))) return 2;
   const win = block.text.slice(Math.max(0, start - 60), start) + ' \n ' + block.text.slice(end, end + 60);
-  if (hasKind(labelKinds(win), kinds)) return 1;
+  if (test(win)) return 1;
   return 0;
+}
+
+/** A field's naming attributes, for free-keyword label tests. */
+function attrText(el: Element): string[] {
+  const out: string[] = [];
+  for (const a of ['name', 'id', 'placeholder', 'aria-label', 'title', 'data-label', 'autocomplete']) {
+    const v = el.getAttribute(a);
+    if (v) out.push(v);
+  }
+  return out;
 }
 
 /** Suggestions in one block: at most one per element, the best-scoring detector. */
 export function detectBlock(block: Block, o: DetectOptions): Hit[] {
-  if (!hasDigits(block.text)) return [];
-  const matches = findMatches(block.text, { ids: o.ids });
-  if (!matches.length) return [];
+  const builtin = hasDigits(block.text);
+  const user = o.user?.length && !budgetSpent(o.budget) && worthScanning(block.text, o.user);
+  if (!builtin && !user) return [];
+  const matches = builtin ? findMatches(block.text, { ids: o.ids }) : [];
+  const userMatches = user ? findUserMatches(block.text, o.user!, o.budget) : [];
+  if (!matches.length && !userMatches.length) return [];
   const best = new Map<Element, Hit>();
+  for (const m of userMatches) {
+    const det = m.det;
+    const t = targetFor(block, m.start, m.end);
+    if (!t || o.exclude?.(t.el)) continue;
+    if (inHref(t.el, block.text.slice(m.start, m.end))) continue;
+    const bonus = labelBonus(block, m.start, m.end, t.el, det.test);
+    if (!accepts(det.strength, bonus, o.sensitivity, det.labelGated)) continue;
+    const score = STRENGTH_POINTS[det.strength] + bonus;
+    const prev = best.get(t.el);
+    if (prev && prev.score >= score) continue;
+    best.set(t.el, { el: t.el, pattern: det.key, name: det.name, strength: det.strength, bonus, score, wide: t.wide, input: false, block, start: m.start, end: m.end });
+  }
   for (const m of matches) {
     const det = DETECTOR_BY_ID[m.id];
     const t = targetFor(block, m.start, m.end);
@@ -113,7 +156,7 @@ export function detectBlock(block: Block, o: DetectOptions): Hit[] {
     const score = STRENGTH_POINTS[det.strength] + bonus;
     const prev = best.get(t.el);
     if (prev && prev.score >= score) continue;
-    best.set(t.el, { el: t.el, pattern: m.id, strength: det.strength, bonus, score, wide: t.wide, input: false, block, start: m.start, end: m.end });
+    best.set(t.el, { el: t.el, pattern: m.id, name: det.name, strength: det.strength, bonus, score, wide: t.wide, input: false, block, start: m.start, end: m.end });
   }
   return Array.from(best.values());
 }
@@ -135,18 +178,32 @@ export function detectInputs(root: ParentNode, o: DetectOptions): Hit[] {
     if (o.exclude?.(el)) continue;
     if (el instanceof HTMLInputElement && NON_TEXT_TYPES.has(el.type)) continue;
     const value = (el as HTMLInputElement | HTMLTextAreaElement).value ?? '';
-    if (!hasDigits(value)) continue;
+    const builtin = hasDigits(value);
+    const user = !!o.user?.length && !budgetSpent(o.budget) && worthScanning(value, o.user);
+    if (!builtin && !user) continue;
     const kinds = inputKinds(el);
-    for (const k of labelKinds(labelFor(el))) kinds.add(k);
+    const label = labelFor(el);
+    for (const k of labelKinds(label)) kinds.add(k);
     const ids = kinds.size ? o.ids : new Set([...HIGH_IDS].filter((id) => !o.ids || o.ids.has(id)));
     let best: Hit | null = null;
-    for (const m of findMatches(value, { ids })) {
+    if (user) {
+      const attrs = attrText(el);
+      for (const m of findUserMatches(value, o.user!, o.budget)) {
+        const det = m.det;
+        const win = value.slice(Math.max(0, m.start - 60), m.start) + ' \n ' + value.slice(m.end, m.end + 60);
+        const bonus = det.test(label) || attrs.some(det.test) ? 3 : det.test(win) ? 1 : 0;
+        if (!accepts(det.strength, bonus, o.sensitivity, det.labelGated)) continue;
+        const score = STRENGTH_POINTS[det.strength] + bonus;
+        if (!best || score > best.score) best = { el, pattern: det.key, name: det.name, strength: det.strength, bonus, score, wide: false, input: true };
+      }
+    }
+    for (const m of builtin ? findMatches(value, { ids }) : []) {
       const det = DETECTOR_BY_ID[m.id];
       const win = value.slice(Math.max(0, m.start - 60), m.start) + ' \n ' + value.slice(m.end, m.end + 60);
       const bonus = hasKind(kinds, det.kinds) ? 3 : hasKind(labelKinds(win), det.kinds) ? 1 : 0;
       if (!accepts(det.strength, bonus, o.sensitivity, det.labelGated)) continue;
       const score = STRENGTH_POINTS[det.strength] + bonus;
-      if (!best || score > best.score) best = { el, pattern: m.id, strength: det.strength, bonus, score, wide: false, input: true };
+      if (!best || score > best.score) best = { el, pattern: m.id, name: det.name, strength: det.strength, bonus, score, wide: false, input: true };
     }
     if (best) out.push(best);
   }
@@ -218,6 +275,8 @@ export interface ScannerHooks {
   /** Place a rectangle sticker (a suggestion inside a long block). */
   coverRect: (rect: ViewRect) => Promise<unknown>;
 }
+
+const ALL_IDS: readonly PatternId[] = DETECTORS.map((d) => d.id);
 
 export const MAX_SUGGESTIONS = 200;
 /** Beyond this many session stickers, auto-covered content is masked without an overlay sticker. */
@@ -409,11 +468,18 @@ export class Scanner {
 
   // ---- internals ----
 
+  /** Some user detector can match text without a digit: digit-free text is not skipped. */
+  private get anyText(): boolean {
+    return this.user.some((d) => !d.needsDigit) && !budgetSpent(this.budget);
+  }
+
   private exclude = (el: Element) => this.h.isOurs(el) || this.h.masker.isMaskedNode(el);
   private skip = (el: Element) => this.h.isOurs(el) || this.h.masker.isMaskRoot(el);
 
   private options(ids?: ReadonlySet<PatternId>): DetectOptions {
-    return { sensitivity: this.sensitivity(), ids, exclude: this.exclude };
+    // Switched-off built-ins only affect suggestions; locked, every one runs.
+    if (!ids && this.builtinOff.size && !this.h.locked()) ids = new Set(ALL_IDS.filter((id) => !this.builtinOff.has(id)));
+    return { sensitivity: this.sensitivity(), ids, exclude: this.exclude, user: this.user, budget: this.budget };
   }
 
   private afterLoad(fn: () => void) {
@@ -490,7 +556,7 @@ export class Scanner {
         if (walking) {
           for (const b of walker.next(CHUNK_BLOCKS, timeUp)) {
             this.stats.blocks++;
-            if (hasDigits(b.text)) {
+            if (worthScanning(b.text, this.user)) {
               this.stats.candidates++;
               order.push(b);
             }
@@ -561,7 +627,7 @@ export class Scanner {
         if (!hit.el.isConnected || this.exclude(hit.el)) return;
         const prev = this.suggestions.get(id);
         if (prev && prev.hit.score > hit.score && prev.hit.el.isConnected) return;
-        this.suggestions.set(id, { id, hit, name: DETECTOR_BY_ID[hit.pattern].name });
+        this.suggestions.set(id, { id, hit, name: hit.name });
         this.notify();
       });
       pending?.push(p);
@@ -604,6 +670,57 @@ export class Scanner {
   }
   private pendingAuto = 0;
 
+  // ---- user-defined detectors ----
+
+  private user: UserDetector[] = [];
+  private builtinOff: ReadonlySet<PatternId> = new Set();
+  private budget: UserBudget = newBudget();
+
+  /**
+   * The user-defined detectors that apply on this page, and the built-ins
+   * switched off (suggestions only: the locked auto-cover runs every
+   * built-in). A new set resets the per-page time budget and rescans.
+   */
+  setDetectors(user: UserDetector[], builtinOff: ReadonlySet<PatternId>, rescan = true) {
+    this.user = user;
+    this.builtinOff = builtinOff;
+    this.budget = newBudget();
+    if (rescan && this.started) this.rescan();
+  }
+
+  /** A new page (SPA navigation): a fresh time budget. */
+  resetBudget() {
+    this.budget = newBudget();
+  }
+
+  /** The 2 s per-page budget of the user detectors ran out. */
+  get budgetExceeded(): boolean {
+    return budgetSpent(this.budget);
+  }
+
+  get userDetectors(): readonly UserDetector[] {
+    return this.user;
+  }
+
+  /**
+   * How many elements on the page `det` would flag at the current threshold
+   * (the "Cover things like this" live count). Synchronous, nothing kept.
+   */
+  countFor(det: UserDetector): number {
+    const root = document.body ?? document.documentElement;
+    if (!root) return 0;
+    const hits = scanSync(document, {
+      sensitivity: this.sensitivity(),
+      ids: new Set<PatternId>(),
+      user: [det],
+      budget: newBudget(500),
+      exclude: this.exclude,
+      skip: this.skip,
+      cap: TEXT_NODE_CAP,
+    });
+    return hits.length;
+  }
+
   /** Mutation callback. Locked: the pre-paint check. Unlocked: remember what changed for the batch. */
   private onRecords(records: MutationRecord[]) {
     if (this.devOff || !this.started) return;
@@ -619,7 +736,7 @@ export class Scanner {
     }
     if (this.dirtyOverflow) return;
     for (const n of touched) {
-      if (n.nodeType === Node.TEXT_NODE && !/\d/.test((n as Text).data)) continue;
+      if (n.nodeType === Node.TEXT_NODE && !this.anyText && !/\d/.test((n as Text).data)) continue;
       this.dirty.add(n);
       if (this.dirty.size > DIRTY_CAP) {
         this.dirtyOverflow = true;
@@ -642,7 +759,7 @@ export class Scanner {
     let budget = PREPAINT_BUDGET;
     const visitText = (t: Text) => {
       budget--;
-      if (!t.isConnected || !/\d/.test(t.data) || isBullets(t.data)) return;
+      if (!t.isConnected || (!this.anyText && !/\d/.test(t.data)) || isBullets(t.data)) return;
       const p = t.parentElement;
       if (!p || SKIP_TAGS.has(p.tagName.toUpperCase()) || this.exclude(p)) return;
       blocks.add(nearestBlock(p));
@@ -669,13 +786,16 @@ export class Scanner {
       return;
     }
     const sensitivity = this.sensitivity();
+    const user = this.user;
+    const userBudget = this.budget;
     for (const b of blocks) {
       const block = ownBlock(b, { skip: this.skip });
-      if (!block || !hasDigits(block.text)) continue;
+      if (!block || !worthScanning(block.text, user)) continue;
       const keyword = labelKinds(block.text).size > 0 || labelKinds(labelFor(b)).size > 0;
-      for (const hit of detectBlock(block, { sensitivity, ids: keyword ? undefined : HIGH_IDS, exclude: this.exclude })) this.autoCover(hit);
+      // User-defined detectors run on every block: the user asked for that shape.
+      for (const hit of detectBlock(block, { sensitivity, ids: keyword ? undefined : HIGH_IDS, exclude: this.exclude, user, budget: userBudget })) this.autoCover(hit);
     }
-    for (const f of fields) for (const hit of detectInputs(f, { sensitivity, exclude: this.exclude })) this.autoCover(hit);
+    for (const f of fields) for (const hit of detectInputs(f, { sensitivity, exclude: this.exclude, user, budget: userBudget })) this.autoCover(hit);
   }
 
   /** Debounced (750 ms): rescan the blocks that changed, drop suggestions whose element went away. */

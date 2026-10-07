@@ -1,4 +1,4 @@
-import { normalizeSettings, type Settings, type SiteRecord } from './types';
+import { cleanDetectors, normalizeSettings, type CustomDetector, type Settings, type SiteRecord } from './types';
 import { randomKeyB64 } from './hmac';
 
 export const siteKey = (origin: string) => `site:${origin}`;
@@ -38,6 +38,7 @@ export function sanitizeForSave(rec: SiteRecord): { rec: SiteRecord; dropped: st
   const safe: SiteRecord = { ...rec, stickers };
   // Dismissals are skipped by the leak scan (HMACs), so only HMAC-shaped entries are kept.
   if (rec.dismissedSuggestions) safe.dismissedSuggestions = cleanDismissed(rec.dismissedSuggestions);
+  if (rec.customDetectors) safe.customDetectors = safeDetectors(cleanDetectors(rec.customDetectors, 'site'));
   assertNoCoveredText(safe);
   return { rec: safe, dropped };
 }
@@ -82,7 +83,27 @@ export async function loadSettings(): Promise<Settings> {
 }
 
 export async function saveSettings(s: Settings): Promise<void> {
-  await chrome.storage.local.set({ [SETTINGS_KEY]: s });
+  const safe: Settings = { ...s };
+  if (s.customDetectors) safe.customDetectors = safeDetectors(cleanDetectors(s.customDetectors, 'global'));
+  assertNoCoveredText(safe);
+  await chrome.storage.local.set({ [SETTINGS_KEY]: safe });
+}
+
+/**
+ * Custom detectors that pass the privacy guard; any other is left out (and
+ * logged). A detector holds a regex source, label words and a name: a raw
+ * identifier in any of them is a bug.
+ */
+export function safeDetectors(list: CustomDetector[]): CustomDetector[] {
+  return list.filter((d) => {
+    try {
+      assertNoCoveredText(d);
+      return true;
+    } catch (e) {
+      console.warn('[aibs] detector left out of storage by the privacy guard', d.id, (e as Error).message);
+      return false;
+    }
+  });
 }
 
 /** Returns the per-install HMAC key, creating it on first use. */
@@ -120,7 +141,7 @@ function isHmacValue(v: unknown): boolean {
   return v === undefined || v === null;
 }
 
-export function assertNoCoveredText(rec: SiteRecord): void {
+export function assertNoCoveredText(rec: unknown): void {
   const visit = (value: unknown, path: string): void => {
     if (typeof value === 'string') {
       // Sticker ids are random UUIDs, and one whose leading groups happen to

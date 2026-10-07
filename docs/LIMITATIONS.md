@@ -126,7 +126,8 @@ close them by breaking the page.
 
 12. **Detection is heuristic.** The scanner knows a fixed set of formats
     (SSN, ITIN, EIN, ABA routing, account, IBAN, card, US-style date of
-    birth, masked last four). Anything else (passport and licence numbers
+    birth, masked last four), plus the catalogue entries and patterns you
+    switch on or teach (see 18). Anything else (passport and licence numbers
     without a matching label, non-US identifiers, numbers in images or
     canvases) is never suggested and never auto-covered. Account numbers,
     bare nine-digit numbers and dates of birth need a label next to them.
@@ -155,10 +156,24 @@ close them by breaking the page.
 17. **Dismissals.** A dismissal is an HMAC of pattern, element position and
     label. If the page moves the number to a different position, it is
     suggested again.
+18. **Taught patterns.** A taught pattern stores a shape, not an example,
+    but the shape itself can say something: `\b[A-Z]{2}-\d{4}-\d{4}\b` with
+    the label "policy" tells anyone who can read extension storage what your
+    insurer's policy numbers look like. Shapes are matched with regular
+    expressions in the content script, on the page's main thread. Every
+    user pattern is length-limited and checked for catastrophic shapes before
+    it is saved or run, and all of them share a 2-second time budget per
+    page: once it is spent, taught and catalogue patterns stop matching on
+    that page until it is reloaded or navigates (the popup says so), while
+    the built-ins keep working, and so does the locked pre-paint check of
+    the built-ins. Turning a built-in off in Settings only hides its suggestions: a locked
+    tab still auto-covers with every built-in. A shape is only as good as the
+    example: a pattern derived from one policy number misses the insurer's
+    other formats.
 
 ## Canvas-drawn pages
 
-18. **No DOM text to work on.** Google Docs, Sheets and Slides, Figma,
+19. **No DOM text to work on.** Google Docs, Sheets and Slides, Figma,
     Excalidraw, Miro, Lucid, PDF viewers and other canvas or WebGL apps draw
     the document onto a `<canvas>` (or into a plugin). What you read is
     pixels. The scanner, Cover element, Cover selection and text masking
@@ -168,7 +183,7 @@ close them by breaking the page.
     text). The popup then explains this, disables Cover element and the
     per-site Suggest switch, and makes Draw rectangle the main action. In
     edit mode the toolbar hides Cover element and Suggestions.
-19. **A rectangle covers screenshots only.** On a canvas page a rectangle
+20. **A rectangle covers screenshots only.** On a canvas page a rectangle
     sticker anchors to the canvas (or its wrapper) and follows it through
     reloads and resizes, but it only hides pixels. Nothing in the DOM is
     masked, because nothing there holds the text. The canvas pixels stay
@@ -199,7 +214,7 @@ close them by breaking the page.
     hidden with `visibility: hidden` instead and need no cover. A rectangle
     anchored to a scroll box itself (drawn larger than the image inside it)
     stays where it was drawn while the box scrolls; draw it over the image.
-20. **The locked auto-cover finds nothing.** While locked, a canvas page
+21. **The locked auto-cover finds nothing.** While locked, a canvas page
     gets no automatic covers. The lock still applies (badge, refusals,
     rectangle stickers stay on), and the audit log records one `canvas-page`
     entry per tab and session, with the origin only and never the path, so
@@ -211,7 +226,7 @@ Chrome's own PDF viewer is a plugin no extension can reach. PDFs opened in
 the extension's viewer (`pdf.html`, built on pdf.js) get a canvas per page
 and pdf.js's text layer on top, and the ordinary sticker engine runs there.
 
-21. **The original file is untouched.** Stickers in the viewer hide the
+22. **The original file is untouched.** Stickers in the viewer hide the
     document from screenshots and from whatever reads the viewer's DOM. The
     PDF itself is still on the server or the disk, and anything that can
     fetch its URL reads all of it. The canvas pixels are readable through
@@ -219,7 +234,7 @@ and pdf.js's text layer on top, and the ordinary sticker engine runs there.
     holds the document, so an agent with debugger access to the viewer tab
     can read it there. Page scripts of other sites cannot: the viewer runs
     only top-level, never in a frame.
-22. **Vector mode is not a redaction.** "Keep text outside stickers
+23. **Vector mode is not a redaction.** "Keep text outside stickers
     (vector)" draws black rectangles on top of the original page content
     with pdf-lib. The text, and any image, under a rectangle stays in the
     file and can be selected, copied and extracted. Only the default
@@ -227,24 +242,24 @@ and pdf.js's text layer on top, and the ordinary sticker engine runs there.
     painted into its pixels, removes it. Flattened pages are larger and
     not searchable. A sticker that is lost at download time has no
     geometry and is not redacted; the viewer warns before saving.
-23. **Text layer geometry.** A covered span keeps the width of the glyphs
+24. **Text layer geometry.** A covered span keeps the width of the glyphs
     pdf.js measured for it, so the bullets do not shrink the sticker. Text
     pdf.js cannot extract (scans, text drawn as paths, Type3 fonts it
     cannot map) has no text layer: there is nothing to mask or scan, and
     only a rectangle covers it. Above pdf.js's span limit per page, later
     text gets no span.
-24. **Getting a PDF into the viewer.** A site's PDF needs host permission
+25. **Getting a PDF into the viewer.** A site's PDF needs host permission
     for that site; a `file://` link needs "Allow access to file URLs" in
     `chrome://extensions` (Open file… and drag and drop always work). The
     "Always open PDFs in the sticker viewer" redirect needs access to all
     sites and only matches top-level navigations to URLs whose path ends in
     `.pdf`; a PDF served from any other URL, embedded in a page or opened
     from a POST still lands in Chrome's viewer.
-25. **Stored per document.** Stickers are keyed by the first 64 bits of the
+26. **Stored per document.** Stickers are keyed by the first 64 bits of the
     file's SHA-256, spelled as letters so the scope sanitiser keeps it. The
     same bytes from another URL get the same stickers; a re-saved copy of
     the "same" document is a different file and starts empty.
-26. **Scrolling and opening.** The pages scroll inside the viewer's own
+27. **Scrolling and opening.** The pages scroll inside the viewer's own
     scroll box, which Chrome moves on the compositor thread, ahead of any
     script; the fixed sticker overlay trails it by a frame or more. The
     viewer therefore also paints every applied sticker into the page itself
@@ -269,7 +284,7 @@ whitespace and the toolbar left out. It applies only while a viewer whose text
 hashes the same is open. Otherwise it is inactive: not tracked, no ghost, and
 the popup lists it only under "N stickers for other views".
 
-26. **Identity is the first page's text.** Two files whose first 1,500
+27. **Identity is the first page's text.** Two files whose first 1,500
     characters read the same (two copies of a form, a template, an empty
     scan with no text layer) share their stickers. A file whose first page
     has no text at all hashes as empty and matches any viewer on that page.
@@ -277,17 +292,17 @@ the popup lists it only under "N stickers for other views".
     then, so stickers placed or shown on far pages go inactive until page 1
     is back in the DOM. A file edited on its first page is a new view and
     starts without stickers.
-27. **The viewer is checked on mutation batches.** Opening and closing are
+28. **The viewer is checked on mutation batches.** Opening and closing are
     seen on the next debounced batch (about 50 ms), plus the time the text
     layer takes to render. During that window the reopened document's
     covered text is readable; the mask lands as soon as the text is there.
-28. **Overlay detection is structural.** A viewer that is neither a dialog,
+29. **Overlay detection is structural.** A viewer that is neither a dialog,
     a modal, nor a fixed layer covering 60% of the viewport (an inline
     preview pane, say) is treated as part of the page and the sticker gets
     the ordinary URL scope. A sticker placed inside a large modal with a lot
     of text (not a document viewer) gets a view identity too, and applies only
     while that modal shows the same text.
-29. **Obfuscated class names are ignored.** Minified class names (Drive's
+30. **Obfuscated class names are ignored.** Minified class names (Drive's
     `a-b-Xa-La-mf-Ic`, `tORug`) change between deployments and are left out
     of selectors. Inside a viewer an anchor is found again by its
     `[role=document]`-rooted structural path and by its text HMAC; two lines
@@ -302,11 +317,11 @@ for the content elsewhere (README, "What happens when a sticker can't find its
 content"). `tests/e2e/stress.spec.ts` and `tests/e2e/failclosed.spec.ts`
 exercise them.
 
-30. **The banner is per frame.** A lost sticker inside an iframe raises the
+31. **The banner is per frame.** A lost sticker inside an iframe raises the
     banner in that frame's own overlay, at the top of the frame, and only the
     top frame drives the toolbar badge. In a small frame the banner can be
     partly out of view.
-31. **Backstops are bounded.** The text-HMAC backstop looks at the first
+32. **Backstops are bounded.** The text-HMAC backstop looks at the first
     5,000 elements of the document (or of the sticker's shadow root or
     viewer) and only at elements whose text has the stored length; the
     token and pattern backstops walk at most 20,000 text nodes and create at
@@ -314,36 +329,36 @@ exercise them.
     then every 2 seconds while it stays lost. Between turning lost (5 s after
     the content went away) and the first backstop pass, a moved copy of the
     text is readable.
-32. **The token backstop skips short words.** A rectangle's covered words
+33. **The token backstop skips short words.** A rectangle's covered words
     are matched only when they contain a digit or are at least six
     characters long; "SSN" or "the" would match everywhere. A covered
     two-letter code that moved is not found again.
-33. **The pattern backstop needs context.** It covers matches of the same
+34. **The pattern backstop needs context.** It covers matches of the same
     detector (SSN, ITIN, card, IBAN, masked last four) near the stored label
     or heading. A number that moved under a different heading and label is
     not covered (unless the original stored neither, in which case every
     match of that detector on the page is). Covers are session-only and go
     away when the sticker is found again or the page reloads.
-34. **Fast path is element stickers only.** A detached or drifted element
+35. **Fast path is element stickers only.** A detached or drifted element
     sticker is matched against inserted nodes inside the mutation callback,
     by text HMAC (record key and id too, where stored), before paint. A rect
     sticker whose container is recycled or replaced is re-resolved on the
     next 50 ms mutation batch; the moved text is readable for that window
     (see 9).
-35. **Text anchoring needs the characters.** A rectangle is drawn around its
+36. **Text anchoring needs the characters.** A rectangle is drawn around its
     masked characters wherever they move. If the page rewrites those
     characters (a different value in the same field) the HMAC no longer
     matches anywhere, and the rectangle falls back to masking whatever the
     projected rectangle covers. Search for the stored characters is capped
     at 20,000 characters of container text.
-36. **A rectangle over a form field masks the whole field.** The field's
+37. **A rectangle over a form field masks the whole field.** The field's
     value is not DOM text, so it is masked in input mode (discs, out of the
     accessibility tree), including the parts of it outside the rectangle.
-37. **Saves are retried, not queued across reloads.** A rejected storage
+38. **Saves are retried, not queued across reloads.** A rejected storage
     write is retried with backoff (1 s doubling to 30 s) while the page is
     open, and once more on `pagehide`. A sticker placed while storage keeps
     failing is lost when the tab closes.
-38. **The boot cloak hides pixels, layout text and the AX tree, not the
+39. **The boot cloak hides pixels, layout text and the AX tree, not the
     DOM.** On origins with stickers the browser injects `cloak.css` at
     `document_start`: the page is `visibility: hidden` until the content
     script has loaded its stickers and placed the ones it can place

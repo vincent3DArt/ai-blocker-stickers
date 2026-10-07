@@ -629,3 +629,125 @@ button:focus-visible {
     transition: none;
   }
 }
+
+/* ---- "Cover things like this" panel ---- */
+.teach {
+  position: absolute;
+  right: 16px;
+  top: 64px;
+  width: 288px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+  font: var(--font);
+  pointer-events: auto;
+  z-index: 5;
+}
+
+.teach[style*='left'] {
+  right: auto;
+}
+
+.teach-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+}
+
+.teach-head .icon {
+  color: var(--amber);
+}
+
+.teach-row {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.teach-row .k {
+  flex: none;
+  width: 78px;
+  color: var(--muted);
+}
+
+.teach-row .v {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.teach-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
+.teach-scope {
+  display: flex;
+  padding: 2px;
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+
+.teach button {
+  all: unset;
+  box-sizing: border-box;
+  cursor: pointer;
+  font: var(--font);
+  text-align: center;
+  border-radius: 7px;
+  padding: 6px 10px;
+}
+
+.teach-scope button {
+  flex: 1;
+  color: var(--muted);
+}
+
+.teach-scope button.on {
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 1px 2px rgba(16, 24, 32, 0.12);
+}
+
+.teach-name {
+  all: unset;
+  box-sizing: border-box;
+  width: 100%;
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font: var(--font);
+  color: var(--text);
+  background: var(--surface);
+}
+
+.teach-name:focus {
+  border-color: var(--accent);
+}
+
+.teach-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.teach button.primary {
+  background: var(--accent);
+  color: #fff;
+  font-weight: 600;
+}
+
+.teach button.primary:hover {
+  background: var(--accent-strong);
+}
+
+.teach button.ghost:hover {
+  background: var(--surface-2);
+}

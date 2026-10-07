@@ -1,5 +1,5 @@
 import type { LockReason } from './lock';
-import type { ScopeKind, Sticker, TabState } from './types';
+import type { DetectorStrength, ScopeKind, Sticker, TabState } from './types';
 
 /** Content script -> background. */
 export type ContentToBackground =
@@ -59,6 +59,16 @@ export type ToContent =
   | { type: 'COVER_SUGGESTIONS' }
   | { type: 'REVIEW_SUGGESTIONS' }
   | { type: 'DISMISS_SUGGESTION'; id: string }
+  // Teach a pattern.
+  /** Open the "Cover things like this" panel for the current selection (context menu). */
+  | { type: 'TEACH_SELECTION' }
+  /** Arm teach mode: the next selection on the page opens the panel (popup). */
+  | { type: 'START_TEACH' }
+  /** Count what a pattern would flag on this page; nothing is stored. */
+  | { type: 'PREVIEW_PATTERN'; regex: string; flags?: string; strength: DetectorStrength; labels: string[] }
+  // Development builds only: open the teach panel for an element's text, and save it.
+  | { type: 'TEST_TEACH'; selector: string }
+  | { type: 'TEST_TEACH_SAVE'; scope: 'site' | 'global'; name?: string }
   // Development builds only: drive placement from tests.
   | { type: 'TEST_COVER'; selector: string; shadowHost?: string; shadowPath?: string[] }
   | { type: 'TEST_RECT'; rect: { x: number; y: number; w: number; h: number } }
@@ -83,6 +93,16 @@ export interface GetSuggestionsResponse {
   total: number;
   scanEnabled: boolean;
   scanning: boolean;
+  /** Custom detectors whose regex did not compile or was refused as unsafe here. */
+  invalidDetectors?: string[];
+  /** The per-page time budget of the user detectors ran out on this page. */
+  budgetExceeded?: boolean;
+}
+
+export interface PreviewPatternResponse {
+  ok: boolean;
+  count?: number;
+  error?: string;
 }
 
 /** Reply to a command the content script refused because the tab is locked. */

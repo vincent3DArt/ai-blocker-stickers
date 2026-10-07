@@ -66,9 +66,27 @@ async function registerScript(id: string, matches: string[], cloak = false): Pro
 
 const hasStickers = (rec: SiteRecord | undefined) => !!rec && rec.v === 1 && Array.isArray(rec.stickers) && rec.stickers.length > 0;
 
+/** Some detector the user taught applies everywhere (Settings.customDetectors). */
+let globalDetectors = false;
+async function loadGlobalDetectors(): Promise<void> {
+  const s = (await chrome.storage.local.get('settings').catch(() => ({}) as Record<string, unknown>)).settings as { customDetectors?: unknown } | undefined;
+  globalDetectors = Array.isArray(s?.customDetectors) && s.customDetectors.length > 0;
+}
+
+/**
+ * The boot cloak: on an origin with stickers, and, during an AI session, on
+ * an origin where a user-taught detector applies (its matches are
+ * auto-covered before the first paint, see content/index.ts holdCloak).
+ */
+function wantsCloak(rec: SiteRecord | undefined): boolean {
+  if (hasStickers(rec)) return true;
+  if (!lock.session) return false;
+  return globalDetectors || (Array.isArray(rec?.customDetectors) && rec.customDetectors.length > 0);
+}
+
 async function registerOrigin(origin: string, rec?: SiteRecord): Promise<void> {
   const site = rec ?? (await loadSite(origin).catch(() => undefined));
-  await registerScript(scriptId(origin), [`${origin}/*`], hasStickers(site));
+  await registerScript(scriptId(origin), [`${origin}/*`], wantsCloak(site));
 }
 
 /**
@@ -79,7 +97,7 @@ async function syncCloak(origin: string, rec: SiteRecord | undefined): Promise<v
   const id = scriptId(origin);
   const [had] = await chrome.scripting.getRegisteredContentScripts({ ids: [id] });
   if (!had) return;
-  if (!!had.css?.length === hasStickers(rec)) return;
+  if (!!had.css?.length === wantsCloak(rec)) return;
   await registerOrigin(origin, rec);
 }
 
@@ -110,6 +128,7 @@ const hasDebugger = () => chrome.permissions.contains({ permissions: ['debugger'
  */
 async function reconcile(): Promise<void> {
   await ready;
+  await loadGlobalDetectors();
   const wanted = new Set<string>();
   const sites = await listSites();
   for (const s of sites) {
@@ -300,6 +319,8 @@ async function startSession(allSites: boolean): Promise<void> {
   await chrome.storage.session.set({ [SESSION_KEY]: { active: true, startedAt: lock.startedAt } });
   await chrome.storage.local.set({ [SESSION_ACTIVE_KEY]: true });
   if (allSites && (await hasAllSites())) await registerScript(ALL_SITES_ID, [ALL_SITES], true).catch(() => {});
+  // Origins with user-taught detectors get the boot cloak while the session runs.
+  await reconcile().catch(() => {});
   await audit({ action: 'session-start' });
   await pushLockAll();
   void ensurePolling();
@@ -312,6 +333,7 @@ async function endSession(keepAllSites: boolean, keepAuto = true): Promise<void>
   await chrome.storage.session.set({ [SESSION_KEY]: { active: false } });
   await chrome.storage.local.set({ [SESSION_ACTIVE_KEY]: false, [KEEP_ALL_SITES_KEY]: keepAllSites });
   if (!keepAllSites) await unregisterId(ALL_SITES_ID);
+  await reconcile().catch(() => {});
   await audit({ action: 'session-end' });
   // Every tab decides about the stickers it auto-covered during the session:
   // stored for good, or dropped once its lock is really off.
@@ -385,6 +407,7 @@ async function tabLocked(tabId: number | undefined): Promise<boolean> {
 const PDF_REDIRECT_KEY = 'pdfRedirect';
 const PDF_RULE_ID = 1;
 const PDF_MENU_ID = 'aibs-pdf-link';
+const TEACH_MENU_ID = 'aibs-teach';
 
 function viewerUrl(src: string): string {
   return chrome.runtime.getURL('pdf.html') + '?src=' + encodeURIComponent(src);
@@ -433,6 +456,11 @@ function createMenus() {
     contexts: ['all'],
   });
   chrome.contextMenus.create({
+    id: TEACH_MENU_ID,
+    title: 'Cover things like this…',
+    contexts: ['selection'],
+  });
+  chrome.contextMenus.create({
     id: PDF_MENU_ID,
     title: 'Open PDF link in sticker viewer',
     contexts: ['link'],
@@ -475,6 +503,12 @@ export default defineBackground(() => {
 
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area !== 'local') return;
+    if (changes.settings) {
+      const had = globalDetectors;
+      void loadGlobalDetectors().then(() => {
+        if (had !== globalDetectors && lock.session) void reconcile().catch(() => {});
+      });
+    }
     for (const [key, change] of Object.entries(changes)) {
       if (!key.startsWith('site:')) continue;
       const origin = parseOrigin(key.slice('site:'.length));
@@ -653,6 +687,10 @@ export default defineBackground(() => {
       if (info.linkUrl && /^(https?|file):/i.test(info.linkUrl)) {
         void chrome.tabs.create({ url: viewerUrl(info.linkUrl), index: tab ? tab.index + 1 : undefined });
       }
+      return;
+    }
+    if (info.menuItemId === TEACH_MENU_ID) {
+      if (tab?.id !== undefined) chrome.tabs.sendMessage(tab.id, { type: 'TEACH_SELECTION' }, { frameId: info.frameId ?? 0 }).catch(() => {});
       return;
     }
     if (info.menuItemId !== 'aibs-cover' || tab?.id === undefined) return;

@@ -1,8 +1,22 @@
-import type { Settings, Sticker, TabState } from '@/shared/types';
-import { DEFAULT_TAB_STATE, normalizeSettings } from '@/shared/types';
-import { isToContent, type GetStickersResponse, type GetSuggestionsResponse, type LockUpdate, type LockedReply, type ToContent } from '@/shared/messages';
+import type { CustomDetector, Settings, Sticker, TabState } from '@/shared/types';
+import { DEFAULT_TAB_STATE, MAX_CUSTOM_DETECTORS, normalizeSettings } from '@/shared/types';
+import {
+  isToContent,
+  type GetStickersResponse,
+  type GetSuggestionsResponse,
+  type LockUpdate,
+  type LockedReply,
+  type PreviewPatternResponse,
+  type ToContent,
+} from '@/shared/messages';
 import { SESSION_ACTIVE_KEY, computeLock, lockMessage, type LockState } from '@/shared/lock';
-import { loadOrCreateSecret, loadSettings } from '@/shared/storage';
+import { assertNoCoveredText, loadOrCreateSecret, loadSettings, saveSettings } from '@/shared/storage';
+import { TeachPanel } from './overlay/teach-panel';
+import { deriveFromExample, normalizeLabelWords, type Derived } from './detect/derive';
+import { checkRegex } from './detect/template';
+import { CATALOG, builtinOff, catalogOn } from './detect/catalog';
+import { compileCatalog, compileCustom, type UserDetector } from './detect/custom';
+import { labelFor } from './detect/labels';
 import { importKey } from '@/shared/hmac';
 import { b64Bytes } from '@/shared/hmac-sync';
 import { mountHost } from './overlay/host';
@@ -120,7 +134,7 @@ export interface BootApi {
 const TO_CONTENT_TYPES = new Set([
   'COMMAND', 'SET_EDIT_MODE', 'SET_PAUSED', 'SET_LOCK', 'GET_STICKERS', 'LOCATE_STICKER', 'DELETE_STICKER', 'SET_SCOPE',
   'COVER_CONTEXT_TARGET', 'START_RECT', 'START_PICK', 'SESSION_ENDED', 'GET_SUGGESTIONS', 'COVER_SUGGESTIONS',
-  'REVIEW_SUGGESTIONS', 'DISMISS_SUGGESTION',
+  'REVIEW_SUGGESTIONS', 'DISMISS_SUGGESTION', 'TEACH_SELECTION', 'START_TEACH', 'PREVIEW_PATTERN',
 ]);
 
 export async function boot(opts: BootOptions = {}): Promise<BootApi | undefined> {
@@ -190,11 +204,17 @@ export async function boot(opts: BootOptions = {}): Promise<BootApi | undefined>
   // the moment storage says nothing here needs covering.
   const host = mountHost();
   host.setColor(settings.appearance.color);
-  if (store.all.length === 0) host.markReady();
+  // Locked at boot with user-defined detectors: the cloak stays on until the
+  // locked full pass (which runs in the same task as liftCloak below) has
+  // covered what they match. Unlocked, nothing is auto-covered: lift at once.
+  const holdCloak =
+    (lockLocal[SESSION_ACTIVE_KEY] === true || (navigator.webdriver === true && !devNoAutoLock)) &&
+    (store.customDetectors.length > 0 || (settings.customDetectors?.length ?? 0) > 0);
+  if (store.all.length === 0 && !holdCloak) host.markReady();
   setFingerprintKey(await importKey(secret), b64Bytes(secret));
   {
     const hm = pathHmacsSync(pageLoc(), depth);
-    if (hm.path && store.active(pagePath(), depth, hm).length === 0) host.markReady();
+    if (hm.path && store.active(pagePath(), depth, hm).length === 0 && !holdCloak) host.markReady();
   }
   const hub = new MutationHub();
   hub.start();
@@ -387,6 +407,36 @@ export async function boot(opts: BootOptions = {}): Promise<BootApi | undefined>
       positioner.markDirty();
     },
   });
+  // ---- user-defined detectors ----
+  /** Custom detectors whose regex did not compile here (reported to the popup). */
+  let invalidDetectors: string[] = [];
+  const compiled = new Map<string, UserDetector | null>();
+  function refreshDetectors(rescan = true) {
+    const user: UserDetector[] = [];
+    const invalid: string[] = [];
+    const custom: CustomDetector[] = [
+      ...(settings.customDetectors ?? []),
+      ...store.customDetectors.filter((d) => !d.origin || d.origin === location.origin),
+    ];
+    const keep = new Set<string>();
+    for (const d of custom) {
+      const k = JSON.stringify([d.id, d.regex, d.flags ?? '', d.strength, d.labels, d.name]);
+      keep.add(k);
+      if (!compiled.has(k)) compiled.set(k, compileCustom(d));
+      const u = compiled.get(k);
+      if (u) user.push(u);
+      else invalid.push(d.id);
+    }
+    for (const k of Array.from(compiled.keys())) if (!keep.has(k)) compiled.delete(k);
+    for (const e of CATALOG) {
+      if (e.builtin || !catalogOn(e, settings.catalog)) continue;
+      const u = compileCatalog(e);
+      if (u) user.push(u);
+    }
+    invalidDetectors = invalid;
+    scanner?.setDetectors(user, builtinOff(settings.catalog), rescan);
+  }
+  refreshDetectors(false);
   scanner.start(devNoScan);
   toolbar.setCanvas(rendering === 'canvas');
   tabState = { ...tabState, rendering };
@@ -417,11 +467,14 @@ export async function boot(opts: BootOptions = {}): Promise<BootApi | undefined>
 
   store.subscribe(() => {
     void session.load();
-    // The popup may have switched suggestions on or off for this site.
+    // The popup may have switched suggestions on or off for this site, or
+    // added, renamed or deleted a site detector.
+    refreshDetectors(false);
     scanner?.rescan();
   });
   spa.onChange(() => {
     void session.handleNavigation();
+    scanner?.resetBudget();
     // Same origin, different app (Drive vs. a Doc): measure again.
     if (opts.forceDom) return;
     if (renderingMeasured) checkRendering(true);
@@ -583,6 +636,149 @@ export async function boot(opts: BootOptions = {}): Promise<BootApi | undefined>
     positioner.flush();
   }
 
+  // ---- teach a pattern ("Cover things like this") ----
+  /** What the open panel would save: the derived shape only. The example is gone by then. */
+  let teachPending: Derived | null = null;
+  /** The popup asked for an example: the next selection on the page opens the panel. */
+  let teachArmed = false;
+  const teachPanel = new TeachPanel(host, {
+    onSave: (o) => void saveTeach(o.scope, o.name),
+    onCancel: () => closeTeach(),
+  });
+
+  function closeTeach() {
+    teachPanel.close();
+    teachPending = null;
+  }
+
+  /** Label words just before the selection inside its block ("MRN 00912345" with only the number selected). */
+  function labelBefore(range: Range): string | undefined {
+    const start = range.startContainer;
+    const block = (start.nodeType === Node.ELEMENT_NODE ? (start as Element) : start.parentElement)?.closest('p,div,li,td,th,dd,dt,label,section,article,span') ?? null;
+    if (!block) return undefined;
+    const pre = document.createRange();
+    pre.setStart(block, 0);
+    pre.setEnd(range.startContainer, range.startOffset);
+    const text = pre.toString().replace(/\s+/g, ' ').slice(-60);
+    const m = text.match(/([\p{L}][\p{L} ]{0,38}?)[\s:#]*$/u);
+    return m ? normalizeLabelWords(m[1]) || undefined : undefined;
+  }
+
+  /**
+   * Derive a detector from the current selection and open the panel. The
+   * selected text is read into a local, reduced to its shape, and dropped
+   * before anything is drawn or stored.
+   */
+  function openTeach(): { ok: boolean; error?: string } {
+    if (lock.locked) {
+      refuse('teach');
+      return { ok: false, error: 'locked' };
+    }
+    const sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0 || sel.isCollapsed) {
+      toolbar.toast('Select an example first.');
+      return { ok: false, error: 'no selection' };
+    }
+    const range = sel.getRangeAt(0);
+    const common = range.commonAncestorContainer;
+    const el = common.nodeType === Node.ELEMENT_NODE ? (common as Element) : common.parentElement;
+    if (!el || isOurs(el)) return { ok: false, error: 'no element' };
+    const label = normalizeLabelWords(labelFor(el)) || labelBefore(range);
+    const derived = (() => {
+      // The only place the example exists: this closure.
+      const example = sel.toString();
+      return deriveFromExample(example, label);
+    })();
+    const anchor = (() => {
+      const r = range.getBoundingClientRect();
+      return { x: r.left, y: r.bottom + 8 };
+    })();
+    if (!derived.ok) {
+      toolbar.toast(derived.error, 2600, 'warn');
+      return { ok: false, error: derived.error };
+    }
+    const { regex, description, strength, labels } = derived;
+    teachPending = { regex, description, strength, labels };
+    const preview = compileCustom({ id: 'preview', name: 'Preview', source: 'example', regex, labels, strength, scope: 'site', createdAt: 0 });
+    const count = preview && scanner ? scanner.countFor(preview) : 0;
+    const name = labels[0] ? labels[0].replace(/^\p{L}/u, (ch) => ch.toUpperCase()) : 'Custom pattern';
+    teachPanel.show({ description, label: labels[0], count, strength, name }, anchor);
+    return { ok: true };
+  }
+
+  async function saveTeach(scope: 'site' | 'global', name: string): Promise<{ ok: boolean; id?: string; error?: string }> {
+    if (lock.locked) {
+      refuse('teach-save');
+      return { ok: false, error: 'locked' };
+    }
+    const p = teachPending;
+    if (!p) return { ok: false, error: 'nothing to save' };
+    const d: CustomDetector = {
+      id: crypto.randomUUID(),
+      name: name.slice(0, 40),
+      source: 'example',
+      regex: p.regex,
+      labels: p.labels,
+      strength: p.strength,
+      scope,
+      ...(scope === 'site' ? { origin: location.origin } : {}),
+      createdAt: Date.now(),
+    };
+    try {
+      assertNoCoveredText(d);
+    } catch {
+      toolbar.toast('Could not save: the name looks like sensitive data.', 2600, 'warn');
+      return { ok: false, error: 'privacy' };
+    }
+    if (scope === 'site') {
+      if (!store.addDetector(d)) {
+        toolbar.toast(`At most ${MAX_CUSTOM_DETECTORS} patterns per site.`, 2600, 'warn');
+        return { ok: false, error: 'cap' };
+      }
+    } else {
+      const cur = await loadSettings();
+      const list = cur.customDetectors ?? [];
+      if (list.length >= MAX_CUSTOM_DETECTORS) {
+        toolbar.toast(`At most ${MAX_CUSTOM_DETECTORS} patterns for all sites.`, 2600, 'warn');
+        return { ok: false, error: 'cap' };
+      }
+      const next = { ...cur, customDetectors: [...list, d] };
+      await saveSettings(next);
+      settings = normalizeSettings(next);
+    }
+    closeTeach();
+    refreshDetectors();
+    toolbar.toast(scope === 'site' ? 'Pattern saved for this site.' : 'Pattern saved for all sites.');
+    return { ok: true, id: d.id };
+  }
+
+  /** Teach mode armed from the popup: the user's next text selection opens the panel. */
+  window.addEventListener(
+    'mouseup',
+    (e) => {
+      if (!teachArmed || !e.isTrusted || isOurs(e.target as Node | null)) return;
+      setTimeout(() => {
+        const sel = window.getSelection();
+        if (!teachArmed || !sel || sel.isCollapsed) return;
+        teachArmed = false;
+        openTeach();
+      }, 0);
+    },
+    true,
+  );
+
+  function startTeach() {
+    if (lock.locked) return void refuse('START_TEACH');
+    const sel = window.getSelection();
+    if (sel && !sel.isCollapsed) {
+      openTeach();
+      return;
+    }
+    teachArmed = true;
+    if (!editing) setEditing(true);
+    toolbar.toast('Select an example of what to cover.', 3500);
+  }
+
   function onToolbar(action: ToolbarAction) {
     switch (action) {
       case 'pick':
@@ -593,6 +789,9 @@ export async function boot(opts: BootOptions = {}): Promise<BootApi | undefined>
         break;
       case 'selection':
         coverSelection();
+        break;
+      case 'teach':
+        openTeach();
         break;
       case 'suggestions':
         reviewNext();
@@ -687,6 +886,8 @@ export async function boot(opts: BootOptions = {}): Promise<BootApi | undefined>
       // Nothing that lifts a sticker survives the lock coming on.
       peek?.cancel();
       stopTools();
+      closeTeach();
+      teachArmed = false;
       editing = false;
       session.setEditing(false);
       toolbar.hide();
@@ -816,6 +1017,28 @@ export async function boot(opts: BootOptions = {}): Promise<BootApi | undefined>
           });
           return true;
         }
+        case 'TEST_TEACH': {
+          const el = document.querySelector(m.selector);
+          if (!el) {
+            sendResponse({ ok: false, error: 'no element' });
+            return true;
+          }
+          const r = document.createRange();
+          r.selectNodeContents(el);
+          const sel = window.getSelection()!;
+          sel.removeAllRanges();
+          sel.addRange(r);
+          const res = openTeach();
+          sendResponse({ ...res, info: teachPanel.info, pending: teachPending });
+          return true;
+        }
+        case 'TEST_TEACH_SAVE':
+          if (!teachPanel.open) {
+            sendResponse({ ok: false, error: 'panel not open' });
+            return true;
+          }
+          void saveTeach(m.scope, m.name ?? teachPanel.info?.name ?? 'Custom pattern').then(sendResponse);
+          return true;
         case 'TEST_FREEZE_OVERLAY':
           overlayDev.frozen = m.on;
           if (!m.on) positioner.flush();
@@ -880,6 +1103,8 @@ export async function boot(opts: BootOptions = {}): Promise<BootApi | undefined>
           total: scanner?.total ?? 0,
           scanEnabled: scanner?.siteEnabled() ?? false,
           scanning: scanner?.scanning ?? false,
+          invalidDetectors: invalidDetectors.slice(),
+          budgetExceeded: scanner?.budgetExceeded ?? false,
         };
         sendResponse(res);
         return true;
@@ -902,6 +1127,38 @@ export async function boot(opts: BootOptions = {}): Promise<BootApi | undefined>
       case 'DISMISS_SUGGESTION':
         if (typeof m.id === 'string') scanner?.dismiss(m.id);
         break;
+      case 'TEACH_SELECTION':
+        if (lock.locked) return refuse('teach', sendResponse);
+        sendResponse(openTeach());
+        return true;
+      case 'START_TEACH':
+        if (lock.locked) return refuse('START_TEACH', sendResponse);
+        if (depth !== 0) return;
+        startTeach();
+        sendResponse({ ok: true });
+        return true;
+      case 'PREVIEW_PATTERN': {
+        if (depth !== 0) return;
+        const chk = checkRegex(String(m.regex ?? ''), typeof m.flags === 'string' ? m.flags : '');
+        let res: PreviewPatternResponse;
+        if (!chk.ok) res = { ok: false, error: chk.error };
+        else {
+          const det = compileCustom({
+            id: 'preview',
+            name: 'Preview',
+            source: 'regex',
+            regex: String(m.regex),
+            flags: typeof m.flags === 'string' ? m.flags : undefined,
+            labels: Array.isArray(m.labels) ? m.labels.filter((l): l is string => typeof l === 'string').slice(0, 8) : [],
+            strength: m.strength === 'high' || m.strength === 'medium' ? m.strength : 'low',
+            scope: 'site',
+            createdAt: 0,
+          });
+          res = det && scanner ? { ok: true, count: scanner.countFor(det) } : { ok: false, error: 'Invalid pattern.' };
+        }
+        sendResponse(res);
+        return true;
+      }
       case 'GET_STICKERS': {
         if (depth !== 0) return;
         const st = session.state();
@@ -950,7 +1207,10 @@ export async function boot(opts: BootOptions = {}): Promise<BootApi | undefined>
       host.setColor(settings.appearance.color);
       updateStrict();
       sendState({ strictInputs: masker.strictCount() });
-      if (prev.scanDefault !== settings.scanDefault || prev.scanSensitivity !== settings.scanSensitivity) scanner?.rescan();
+      const detectorsChanged =
+        JSON.stringify([prev.customDetectors, prev.catalog]) !== JSON.stringify([settings.customDetectors, settings.catalog]);
+      if (detectorsChanged) refreshDetectors();
+      else if (prev.scanDefault !== settings.scanDefault || prev.scanSensitivity !== settings.scanSensitivity) scanner?.rescan();
     }
     if (area === 'local' && SESSION_ACTIVE_KEY in changes) {
       localSession = changes[SESSION_ACTIVE_KEY].newValue === true;
