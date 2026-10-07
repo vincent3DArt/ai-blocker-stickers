@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { inflateSync } from 'node:zlib';
 
 /** Origin of the fixtures server (FIXTURES_PORT, default 4173; see playwright.config.ts). */
 export const ORIGIN = 'http://127.0.0.1:' + (process.env.FIXTURES_PORT ?? '4173');
@@ -156,7 +157,6 @@ export function coverage(target: { x: number; y: number; w: number; h: number },
 export async function pixelAt(page: Page, x: number, y: number): Promise<[number, number, number]> {
   const png = await page.screenshot({ clip: { x: Math.round(x), y: Math.round(y), width: 1, height: 1 } });
   // Decode the 1x1 PNG: find IDAT and inflate.
-  const { inflateSync } = await import('node:zlib');
   let off = 8;
   const chunks: Buffer[] = [];
   let colorType = 6;
@@ -172,4 +172,58 @@ export async function pixelAt(page: Page, x: number, y: number): Promise<[number
   const bpp = colorType === 6 ? 4 : colorType === 2 ? 3 : 1;
   // First byte is the filter type for the row.
   return [raw[1], raw[2], bpp >= 3 ? raw[3] : raw[1]];
+}
+
+/** Minimal PNG decoder (8-bit RGB/RGBA, non-interlaced: what Chromium screenshots are). */
+export function decodePng(png: Buffer): { w: number; h: number; at(x: number, y: number): number[] } {
+  let off = 8;
+  const idat: Buffer[] = [];
+  let w = 0;
+  let h = 0;
+  let colorType = 6;
+  while (off < png.length) {
+    const len = png.readUInt32BE(off);
+    const type = png.subarray(off + 4, off + 8).toString('ascii');
+    const data = png.subarray(off + 8, off + 8 + len);
+    if (type === 'IHDR') {
+      w = data.readUInt32BE(0);
+      h = data.readUInt32BE(4);
+      colorType = data[9];
+    }
+    if (type === 'IDAT') idat.push(data);
+    off += 12 + len;
+  }
+  const bpp = colorType === 6 ? 4 : 3;
+  const raw = inflateSync(Buffer.concat(idat));
+  const stride = w * bpp;
+  const out = Buffer.alloc(h * stride);
+  for (let y = 0; y < h; y++) {
+    const f = raw[y * (stride + 1)];
+    const src = y * (stride + 1) + 1;
+    for (let x = 0; x < stride; x++) {
+      const a = x >= bpp ? out[y * stride + x - bpp] : 0;
+      const b = y > 0 ? out[(y - 1) * stride + x] : 0;
+      const c = x >= bpp && y > 0 ? out[(y - 1) * stride + x - bpp] : 0;
+      let v = raw[src + x];
+      if (f === 1) v += a;
+      else if (f === 2) v += b;
+      else if (f === 3) v += (a + b) >> 1;
+      else if (f === 4) {
+        const p = a + b - c;
+        const pa = Math.abs(p - a);
+        const pb = Math.abs(p - b);
+        const pc = Math.abs(p - c);
+        v += pa <= pb && pa <= pc ? a : pb <= pc ? b : c;
+      }
+      out[y * stride + x] = v & 255;
+    }
+  }
+  return {
+    w,
+    h,
+    at(x, y) {
+      const i = Math.min(h - 1, Math.max(0, Math.round(y))) * stride + Math.min(w - 1, Math.max(0, Math.round(x))) * bpp;
+      return [out[i], out[i + 1], out[i + 2]];
+    },
+  };
 }

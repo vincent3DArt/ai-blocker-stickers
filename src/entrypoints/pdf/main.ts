@@ -145,6 +145,7 @@ async function renderTextLayer(pv: PageView): Promise<void> {
 }
 
 function clearPages() {
+  coverKey = '';
   observer?.disconnect();
   observer = null;
   renderQueue.length = 0;
@@ -241,8 +242,66 @@ async function show(bytes: Uint8Array, name: string) {
   titleEl.title = name;
   document.title = `${name} - Sticker PDF viewer`;
   engine?.refresh();
+  syncCover();
   setState('ready');
   status(`${pages.length} page${pages.length === 1 ? '' : 's'}`);
+}
+
+// ---- cover painted into the pages ----
+
+/*
+ * The sticker overlay is a fixed layer above the page, repositioned from
+ * script after every scroll event. The pages scroll inside <main>, and Chrome
+ * scrolls that box on the compositor thread: frames reach the screen before
+ * the overlay has caught up, so for a frame or more while scrolling the
+ * canvas glyphs under a sticker are visible next to it. (Masking the text
+ * layer does nothing for this: it is transparent, the canvas draws the text.)
+ *
+ * So the cover is also painted INTO each page, as boxes positioned in
+ * percentages of the page inside the scroll container. They move with the
+ * page in the same composited frame, scroll and zoom included, and are only
+ * rewritten when a sticker's place on its page changes. The overlay still
+ * draws on top (edit chrome, labels, peeking).
+ */
+const COVER_TAG = 'pdf-cover';
+let coverKey = '';
+
+function syncCover() {
+  const cur = current;
+  if (!cur || !engine) return;
+  const boxes: PageBox[] = cur.pages.map((p) => {
+    const r = p.el.getBoundingClientRect();
+    return { box: { x: r.left, y: r.top, w: r.width, h: r.height }, width: 100, height: 100 };
+  });
+  const pct = viewRectsToPageRects(engine.coverRects(), boxes);
+  const color = engine.color;
+  const key = color + '|' + pct.map((r) => [r.page, r.x, r.y, r.w, r.h].map((v) => v.toFixed(3)).join(',')).join(';');
+  if (key === coverKey) return;
+  coverKey = key;
+  for (const pv of cur.pages) {
+    const mine = pct.filter((r) => r.page === pv.index);
+    let layer = pv.el.querySelector<HTMLElement>(':scope > ' + COVER_TAG);
+    if (!mine.length) {
+      layer?.replaceChildren();
+      continue;
+    }
+    if (!layer) {
+      layer = document.createElement(COVER_TAG);
+      layer.setAttribute('aria-hidden', 'true');
+      pv.el.appendChild(layer);
+    }
+    layer.style.setProperty('--cover', color);
+    const pieces = mine.map((r) => {
+      const b = document.createElement('b');
+      // Edges pushed out by a hair, so anti-aliasing never leaves a glyph column.
+      b.style.left = `calc(${r.x}% - 0.5px)`;
+      b.style.top = `calc(${r.y}% - 0.5px)`;
+      b.style.width = `calc(${r.w}% + 1px)`;
+      b.style.height = `calc(${r.h}% + 1px)`;
+      return b;
+    });
+    layer.replaceChildren(...pieces);
+  }
 }
 
 // ---- zoom and page indicator ----
@@ -466,6 +525,7 @@ async function main() {
   setState('empty');
   try {
     engine = await boot({ pagePath: () => scopePath, forceDom: true });
+    engine?.onLayout(syncCover);
   } catch (e) {
     console.error('[aibs] sticker engine failed to start', e);
   }

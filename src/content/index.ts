@@ -96,6 +96,16 @@ export interface BootApi {
   startRect(): void;
   /** Unclipped viewport rects of every applied sticker, and how many are lost. */
   geometry(): { rects: ViewRect[]; lost: number };
+  /**
+   * Viewport rects that are covered on screen right now (peeked and paused
+   * stickers excluded), without forcing a reposition. With `onLayout`, lets
+   * the page paint the cover into its own scrolling content as well.
+   */
+  coverRects(): ViewRect[];
+  /** Called after every reposition and peek change. Returns an unsubscribe function. */
+  onLayout(cb: () => void): () => void;
+  /** The sticker colour from the settings. */
+  readonly color: string;
   /** Re-run sticker resolution and scanning after the page replaced its content. */
   refresh(): void;
   /** Remove every sticker that applies here (the PDF viewer's current document). Refused while locked. */
@@ -214,11 +224,15 @@ export async function boot(opts: BootOptions = {}): Promise<BootApi | undefined>
   const spa = new SpaNav();
   let peek: Peek | undefined;
   let suggestView: SuggestView | undefined;
+  /** Extension pages that paint the cover themselves (the PDF viewer), told after every reposition. */
+  const layoutListeners = new Set<() => void>();
+  const notifyLayout = () => layoutListeners.forEach((f) => f());
   const positioner = new Positioner(
     () => {
       session.recompute();
       peek?.reposition();
       if (!lock.locked) suggestView?.reposition();
+      notifyLayout();
     },
     () => {
       host.reassert();
@@ -423,7 +437,10 @@ export async function boot(opts: BootOptions = {}): Promise<BootApi | undefined>
       return hit ? toTarget(hit) : null;
     },
     all: () => session.visible().map(toTarget),
-    onPeek: (ids, on) => session.setPeek(ids, on),
+    onPeek: (ids, on) => {
+      session.setPeek(ids, on);
+      notifyLayout();
+    },
     locked: () => lock.locked,
   });
   peek.start();
@@ -938,6 +955,14 @@ export async function boot(opts: BootOptions = {}): Promise<BootApi | undefined>
     geometry: () => {
       positioner.flush();
       return session.geometry();
+    },
+    coverRects: () => session.coverGeometry(),
+    onLayout: (cb) => {
+      layoutListeners.add(cb);
+      return () => layoutListeners.delete(cb);
+    },
+    get color() {
+      return settings.appearance.color;
     },
     refresh: () => {
       void session.handleNavigation();

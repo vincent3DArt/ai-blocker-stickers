@@ -224,6 +224,18 @@ and pdf.js's text layer on top, and the ordinary sticker engine runs there.
     file's SHA-256, spelled as letters so the scope sanitiser keeps it. The
     same bytes from another URL get the same stickers; a re-saved copy of
     the "same" document is a different file and starts empty.
+26. **Scrolling and opening.** The pages scroll inside the viewer's own
+    scroll box, which Chrome moves on the compositor thread, ahead of any
+    script; the fixed sticker overlay trails it by a frame or more. The
+    viewer therefore also paints every applied sticker into the page itself
+    (a `pdf-cover` layer inside each page, in page percentages), so the
+    cover moves with the page in the same frame while scrolling and
+    zooming. That layer is rewritten one frame after a sticker is drawn,
+    moved or peeked at, not before. While a document opens, its text layer
+    is in the DOM with the raw text from the moment pdf.js has read every
+    page until the document's stickers are applied (well under 1.5 s for a
+    short document, longer for a long one); a DOM reader polling in that
+    window can read it. The canvas pixels are uncovered for the same window.
 
 ## In-page viewers (Drive's file preview)
 

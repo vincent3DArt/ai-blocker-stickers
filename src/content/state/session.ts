@@ -881,10 +881,11 @@ export class Session {
    * padding included. Used by the PDF viewer's redacted download. `lost`
    * counts stickers that have no geometry because their anchor is missing.
    */
-  geometry(): { rects: ViewRect[]; lost: number } {
+  geometry(include: (id: string) => boolean = () => true): { rects: ViewRect[]; lost: number } {
     const rects: ViewRect[] = [];
     let lost = 0;
     for (const rt of this.runtimes.values()) {
+      if (!include(rt.sticker.id)) continue;
       if (rt.status !== 'resolved' || !rt.el?.isConnected) {
         lost++;
         continue;
@@ -899,6 +900,16 @@ export class Session {
       for (const t of rt.ties) if (t.isConnected) rects.push(...clientRects(t).filter((r) => r.w > 0 && r.h > 0).map(grow));
     }
     return { rects, lost };
+  }
+
+  /**
+   * What is covered on screen right now: `geometry()` minus stickers being
+   * peeked at, nothing while paused. The PDF viewer paints these into its
+   * pages, inside the scroll container, so they move with the compositor.
+   */
+  coverGeometry(): ViewRect[] {
+    if (this.paused) return [];
+    return this.geometry((id) => !this.peeking.has(id)).rects;
   }
 
   originals(id: string): string {
