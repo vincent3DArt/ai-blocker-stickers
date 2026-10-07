@@ -912,6 +912,26 @@ export class Session {
     return this.geometry((id) => !this.peeking.has(id)).rects;
   }
 
+  /**
+   * Rect stickers that are covered on screen right now (not peeked at, not
+   * paused, anchor in the page), with their padded, unclipped viewport rect:
+   * candidates for an in-page cover (overlay/in-page-cover.ts), which decides
+   * whether the pixels underneath need one.
+   */
+  coverItems(): Array<{ id: string; anchor: Element; rect: ViewRect }> {
+    if (this.paused) return [];
+    const out: Array<{ id: string; anchor: Element; rect: ViewRect }> = [];
+    for (const rt of this.runtimes.values()) {
+      if (rt.sticker.kind !== 'rect' || rt.status !== 'resolved' || !rt.el?.isConnected || this.peeking.has(rt.sticker.id)) continue;
+      // Offscreen ones too: a cover must already be in place when the compositor scrolls the content in.
+      if (!isRendered(rt.el)) continue;
+      const pad = rt.sticker.padding;
+      const r = this.rectGeometry(rt, rt.el).rect;
+      out.push({ id: rt.sticker.id, anchor: rt.el, rect: { x: r.x - pad, y: r.y - pad, w: r.w + pad * 2, h: r.h + pad * 2 } });
+    }
+    return out;
+  }
+
   originals(id: string): string {
     return this.o.masker.originals(id);
   }

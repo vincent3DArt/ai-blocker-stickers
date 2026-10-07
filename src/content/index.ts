@@ -8,12 +8,14 @@ import { b64Bytes } from '@/shared/hmac-sync';
 import { mountHost } from './overlay/host';
 import { Positioner } from './overlay/positioner';
 import { Picker } from './overlay/picker';
+import { overlayDev } from './overlay/sticker-view';
 import { RectDraw } from './overlay/rect-draw';
 import { Toolbar, type ToolbarAction } from './overlay/toolbar';
 import { Banner } from './overlay/banner';
 import { EditChrome } from './overlay/edit-chrome';
 import { defaultPathPattern, prefixPathPattern, sanitizePathPattern } from '@/shared/url-match';
 import { Peek, type PeekTarget } from './overlay/peek';
+import { InPageCovers } from './overlay/in-page-cover';
 import { MutationHub } from './mask/guard';
 import { Masker } from './mask/masker';
 import { setFingerprintKey } from './anchor/fingerprint';
@@ -62,8 +64,8 @@ function frameDepth(): number {
  *
  * A tab an AI agent drives without fronting it has no animation frames and a
  * hidden `document`, and that is the environment masking must survive. It
- * cannot be produced under Playwright — every page it drives stays `visible`
- * and keeps getting frames, whichever tab is in front — and an init script
+ * cannot be produced under Playwright â€” every page it drives stays `visible`
+ * and keeps getting frames, whichever tab is in front â€” and an init script
  * cannot help either, because it runs in the page's world while our code runs
  * in the extension's isolated one.
  *
@@ -194,10 +196,20 @@ export async function boot(opts: BootOptions = {}): Promise<BootApi | undefined>
     const hm = pathHmacsSync(pageLoc(), depth);
     if (hm.path && store.active(pagePath(), depth, hm).length === 0) host.markReady();
   }
-  const isOurs = (n: Node | null) => host.isOurs(n);
-
   const hub = new MutationHub();
   hub.start();
+  // Covers inside the page for rect stickers over pixels (canvas, images):
+  // they scroll with the content on the compositor, the overlay trails it.
+  // The PDF viewer paints its own page-local layer instead.
+  const covers = new InPageCovers({
+    hub,
+    color: () => settings.appearance.color,
+    mode: () => rendering,
+    enabled: !extensionPage,
+  });
+  const syncCovers = () => covers.sync(session.coverItems());
+  /** Our overlay host and its shadow tree, and our in-page covers: never page content. */
+  const isOurs = (n: Node | null) => host.isOurs(n) || covers.isOurs(n);
   const masker = new Masker(hub);
   masker.start();
 
@@ -230,6 +242,7 @@ export async function boot(opts: BootOptions = {}): Promise<BootApi | undefined>
   const positioner = new Positioner(
     () => {
       session.recompute();
+      syncCovers();
       peek?.reposition();
       if (!lock.locked) suggestView?.reposition();
       notifyLayout();
@@ -259,7 +272,7 @@ export async function boot(opts: BootOptions = {}): Promise<BootApi | undefined>
     renderingMeasured = true;
     let next: RenderingMode;
     try {
-      next = pageRenderingMode({ skip: (n) => host.isOurs(n) });
+      next = pageRenderingMode({ skip: isOurs });
     } catch {
       return;
     }
@@ -439,6 +452,7 @@ export async function boot(opts: BootOptions = {}): Promise<BootApi | undefined>
     all: () => session.visible().map(toTarget),
     onPeek: (ids, on) => {
       session.setPeek(ids, on);
+      syncCovers();
       notifyLayout();
     },
     locked: () => lock.locked,
@@ -779,6 +793,7 @@ export async function boot(opts: BootOptions = {}): Promise<BootApi | undefined>
             lock: { ...lock, signals: { debugger: bgLock.debugger, manual: bgLock.manual, localSession, webdriver: webdriver() } },
             strict: { on: masker.isStrict, count: masker.strictCount() },
             rendering,
+            covers: covers.count,
             maskRetry: session.maskRetryActive,
             anchors: session.anchorTags(),
             scan: {
@@ -801,6 +816,11 @@ export async function boot(opts: BootOptions = {}): Promise<BootApi | undefined>
           });
           return true;
         }
+        case 'TEST_FREEZE_OVERLAY':
+          overlayDev.frozen = m.on;
+          if (!m.on) positioner.flush();
+          sendResponse({ ok: true });
+          return true;
         case 'TEST_COVER_SUGGESTIONS':
           if (lock.locked || !scanner) {
             sendResponse({ ok: false, covered: 0 });

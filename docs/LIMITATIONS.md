@@ -179,6 +179,26 @@ close them by breaking the page.
     copy of the document to the page). An agent with API access or with
     accessibility mode turned on reads the document directly. That is
     outside any extension's reach.
+
+    **Overlay lag while scrolling.** Chrome scrolls the document and
+    overflow boxes on the compositor thread, ahead of script, so the fixed
+    overlay trails the content by a frame or more. Masked text is bullets
+    and is safe in that gap; pixels are not. A rectangle over pixels (a
+    canvas page, or a `canvas`, `img`, `video`, `svg`, `object` or `embed`
+    under it, or a container with a background image) therefore also gets
+    an `<aibs-cover>` box inside the page, in the anchor's nearest
+    containing block, which the compositor moves with the content. To
+    contain it, a static scroll box is made `position: relative` only when
+    that cannot change layout; otherwise the cover goes further out and
+    does not follow that box's scroll, and the lag remains there. The cover
+    is in the page's DOM: a page script can see it, and removing or
+    restyling it is undone in the same microtask (a page stylesheet loses to
+    its inline `!important` styles). It also counts as a child of its
+    parent for `:last-child`-style selectors. Covers are rewritten one frame
+    after a sticker moves or is peeked at. Element stickers on media are
+    hidden with `visibility: hidden` instead and need no cover. A rectangle
+    anchored to a scroll box itself (drawn larger than the image inside it)
+    stays where it was drawn while the box scrolls; draw it over the image.
 20. **The locked auto-cover finds nothing.** While locked, a canvas page
     gets no automatic covers. The lock still applies (badge, refusals,
     rectangle stickers stay on), and the audit log records one `canvas-page`

@@ -16,6 +16,7 @@ const DENY = [
   'TEST_RECT',
   'TEST_STATE',
   'TEST_SESSION',
+  'TEST_FREEZE_OVERLAY',
   'aibsNoScan',
   'aibsNoAutoLock',
   'emulateHidden',

@@ -648,6 +648,65 @@ test.describe('red team: tampering', () => {
     cleanAll({ innerText: await pageInnerText(page) });
   });
 
+  test('14c removing or restyling an in-page cover is undone before the next paint', async ({ page, ext }) => {
+    // A rect sticker over an image gets an <aibs-cover> inside the page (see
+    // overlay/in-page-cover.ts), which a MAIN-world script can reach.
+    await page.goto('/image-page.html');
+    await page.evaluate(() => Promise.all(Array.from(document.images, (i) => i.decode().catch(() => {}))));
+    const card = await boxOf(page, '#card-flow');
+    await ext.rect(page, { x: card.x, y: card.y, w: card.w, h: card.h });
+    await expect.poll(() => page.evaluate(() => document.querySelectorAll('aibs-cover').length)).toBe(1);
+    // Freeze the fixed overlay and move the page under it: from here on only
+    // the in-page cover can be what covers the image.
+    await ext.send(page, { type: 'TEST_FREEZE_OVERLAY', on: true });
+    try {
+      await page.evaluate(() => window.scrollBy(0, 150));
+      const moved = await boxOf(page, '#card-flow');
+      expect(moved.y).toBeLessThan(card.y - 100);
+      await expect.poll(() => coveredAt(page, moved), { timeout: 3000, message: 'cover before the attacks' }).toBe(true);
+      const attacks: Array<[string, () => void]> = [
+        ['remove', () => document.querySelector('aibs-cover')!.remove()],
+        ['inline display:none', () => ((document.querySelector('aibs-cover') as HTMLElement).style.display = 'none')],
+        ['style attribute', () => document.querySelector('aibs-cover')!.setAttribute('style', 'background:transparent')],
+        ['hidden attribute', () => document.querySelector('aibs-cover')!.setAttribute('hidden', '')],
+        ['move elsewhere', () => document.getElementById('after')!.appendChild(document.querySelector('aibs-cover')!)],
+        [
+          'page stylesheet',
+          () => {
+            const st = document.createElement('style');
+            st.textContent = 'aibs-cover{display:none!important;opacity:0!important;visibility:hidden!important;background:transparent!important;transform:scale(0)!important}';
+            document.head.appendChild(st);
+          },
+        ],
+      ];
+      for (const [name, fn] of attacks) {
+        const state = await page.evaluate(async (src) => {
+          (0, eval)(`(${src})`)();
+          // Microtasks only: no task, no frame.
+          for (let i = 0; i < 5; i++) await Promise.resolve();
+          const inMicrotask = (() => {
+            const c = document.querySelectorAll('aibs-cover');
+            return c.length === 1 && c[0].parentElement === document.body && !c[0].hasAttribute('hidden') && getComputedStyle(c[0]).display === 'block';
+          })();
+          // The last thing that runs before the next paint.
+          const beforePaint = await new Promise<boolean>((r) =>
+            requestAnimationFrame(() => {
+              const c = document.querySelector('aibs-cover');
+              const cs = c && getComputedStyle(c);
+              r(!!cs && cs.display === 'block' && cs.visibility === 'visible' && cs.opacity === '1' && cs.backgroundColor === 'rgb(31, 41, 55)');
+            }),
+          );
+          return { inMicrotask, beforePaint };
+        }, fn.toString());
+        if (name !== 'page stylesheet') expect(state.inMicrotask, `cover restored in the same microtask after ${name}`).toBe(true);
+        expect(state.beforePaint, `cover in place before the next paint after ${name}`).toBe(true);
+        expect(await coveredAt(page, moved), `pixels after ${name}`).toBe(true);
+      }
+    } finally {
+      await ext.send(page, { type: 'TEST_FREEZE_OVERLAY', on: false });
+    }
+  });
+
   test('14b page CSS cannot recolour, fade, blur or hide the stickers from outside the shadow root', async ({ page, ext }) => {
     await setupStatic(page, ext);
     const cell = await boxOf(page, '#ssn-cell');

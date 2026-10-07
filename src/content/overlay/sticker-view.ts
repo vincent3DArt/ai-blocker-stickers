@@ -1,6 +1,13 @@
 import type { AnchorStatus, Confidence, Sticker, ViewRect } from '@/shared/types';
 import type { OverlayHost } from './host';
 
+/**
+ * Development builds only (TEST_FREEZE_OVERLAY): while set, sticker pieces
+ * are not moved, standing for the frame or more by which the fixed overlay
+ * trails a compositor scroll. The guard is folded away in production.
+ */
+export const overlayDev = { frozen: false };
+
 export interface StickerViewOptions {
   showLabel: boolean;
   onGhostClick?: (sticker: Sticker) => void;
@@ -37,6 +44,7 @@ export class StickerView {
   }
 
   update(rects: ViewRect[], status: AnchorStatus, confidence: Confidence = 'high') {
+    if (import.meta.env.DEV && overlayDev.frozen) return;
     this.status = status;
     this.confidence = confidence;
     this.lastRects = rects;

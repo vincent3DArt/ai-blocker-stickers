@@ -55,7 +55,9 @@ a zoom, or a re-wrapped line therefore moves the sticker with the text instead o
 the old coordinates. After a reload the fractions give a first guess, and if the characters under it
 do not hash right, the container is searched for the window that does. Form fields under a
 rectangle are masked whole. A rectangle over no text follows the container fractions; if the
-container's aspect ratio changes sharply, it falls back to its pixel size.
+container's aspect ratio changes sharply, it falls back to its pixel size. A rectangle over pixels
+(a canvas-drawn page, an image, a video) also gets an opaque cover inside the page, which scrolls
+with the content in the same frame while the overlay catches up.
 
 A sticker whose node starts showing a different record (a virtualised list recycling its rows, a
 reused component showing the next client) notices that the record key or text HMAC no longer match.

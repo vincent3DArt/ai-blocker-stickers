@@ -64,7 +64,9 @@ export type ToContent =
   | { type: 'TEST_RECT'; rect: { x: number; y: number; w: number; h: number } }
   | { type: 'TEST_STATE' }
   | { type: 'TEST_COVER_SUGGESTIONS' }
-  | { type: 'TEST_RESCAN' };
+  | { type: 'TEST_RESCAN' }
+  /** Stop repositioning the fixed overlay (stands for compositor lag); in-page covers keep working. */
+  | { type: 'TEST_FREEZE_OVERLAY'; on: boolean };
 
 export interface SuggestionSummary {
   /** HMAC identity; what DISMISS_SUGGESTION takes. */
