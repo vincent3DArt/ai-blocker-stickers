@@ -56,7 +56,11 @@ export default defineConfig({
       optional_host_permissions: ['*://*/*'],
       // Development builds pre-authorise the local fixtures server so the e2e
       // suite and manual testing don't need the permission prompt.
-      host_permissions: dev ? fixtures : [],
+      // file:///*: MV3 reads a local PDF opened by link only with this host
+      // permission AND "Allow access to file URLs"; the switch alone gets
+      // "Not allowed to load local resource". It adds no install warning, and
+      // local files stay off until the user turns the switch on.
+      host_permissions: [...(dev ? fixtures : []), 'file:///*'],
       // A redirect rule can only send a navigation to an extension page that
       // is web-accessible. The viewer refuses to run inside a frame.
       web_accessible_resources: [{ resources: ['pdf.html'], matches: ['*://*/*'] }],
