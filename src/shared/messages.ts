@@ -35,7 +35,6 @@ export interface SessionInfo {
   startedAt?: number;
   keepAllSites: boolean;
   allSitesGranted: boolean;
-  debuggerGranted: boolean;
 }
 
 /** Background/popup -> content script (delivered to every frame in the tab). */

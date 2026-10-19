@@ -151,14 +151,16 @@ elements tie, both are covered.
 
 The lock comes on in three ways:
 
-- **Debugger attached.** Grant the optional `debugger` permission and the extension checks every
-  2 seconds whether a debugger is attached to a tab with stickers. That tab locks until it
-  detaches. Opening DevTools on a tab locks it too.
+- **Debugger attached.** The extension checks every 2 seconds whether a debugger is attached to a
+  tab with stickers. That tab locks until it detaches. Opening DevTools on a tab locks it too. This
+  needs the `debugger` permission, which Chrome only grants at install. So the install prompt warns
+  "Access the page debugger backend" and "Read and change all your data on all websites". The
+  extension never attaches a debugger itself: it only asks Chrome which tabs have one attached.
 - **`navigator.webdriver`.** A page driven by WebDriver or Playwright locks itself.
 - **AI session.** Click "Start AI session" in the popup before you hand the browser to an agent.
   Every tab locks until you click "End session" and confirm. The first start asks for access to all
-  sites, so stickers apply everywhere, and for the `debugger` permission. Tick "Keep protection on
-  all sites" when you end it to keep the all-sites content script.
+  sites, so stickers apply everywhere. Tick "Keep protection on all sites" when you end it to keep
+  the all-sites content script.
 
 The popup's "Lock activity" section shows the last five lock events: session start and end,
 auto-lock and unlock, and refused actions. The log keeps 200 entries and records only the origin
