@@ -751,3 +751,93 @@ button:focus-visible {
 .teach button.ghost:hover {
   background: var(--surface-2);
 }
+/* ---- Edit text ---- */
+.capture.text {
+  cursor: text;
+}
+
+.edit-marks {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.edit-mark {
+  position: absolute;
+  left: 0;
+  top: 0;
+  outline: 1.5px dashed var(--amber);
+  outline-offset: 2px;
+  border-radius: 2px;
+  pointer-events: none;
+}
+
+.text-editor {
+  position: absolute;
+  left: 0;
+  top: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-width: min(640px, calc(100vw - 16px));
+  padding: 6px;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: var(--shadow);
+  font: var(--font);
+  pointer-events: auto;
+  z-index: 6;
+}
+
+.te-field {
+  all: unset;
+  box-sizing: border-box;
+  field-sizing: content;
+  display: block;
+  max-width: 100%;
+  max-height: 40vh;
+  overflow: auto;
+  padding: 4px 6px;
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  outline: 2px solid var(--accent);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.te-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.te-row label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+}
+
+.te-revert {
+  all: unset;
+  cursor: pointer;
+  padding: 3px 8px;
+  border-radius: 6px;
+  color: var(--text);
+  background: var(--surface-2);
+}
+
+.te-revert:hover,
+.te-revert:focus-visible {
+  background: var(--accent-soft);
+}
+
+.te-keys {
+  margin-left: auto;
+  opacity: 0.8;
+}

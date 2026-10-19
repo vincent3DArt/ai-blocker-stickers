@@ -52,6 +52,8 @@ export type ToContent =
   | { type: 'COVER_CONTEXT_TARGET' }
   | { type: 'START_RECT' }
   | { type: 'START_PICK' }
+  /** Turn on the Edit text tool (edits last until reload; refused while locked). */
+  | { type: 'START_EDIT_TEXT' }
   /** The manual AI session ended: keep (store) or drop the auto-covered stickers. */
   | { type: 'SESSION_ENDED'; keepAuto: boolean }
   // Auto-suggest.
@@ -73,6 +75,9 @@ export type ToContent =
   | { type: 'TEST_COVER'; selector: string; shadowHost?: string; shadowPath?: string[] }
   | { type: 'TEST_RECT'; rect: { x: number; y: number; w: number; h: number } }
   | { type: 'TEST_STATE' }
+  /** Edit the `index`th text node under `selector` as if typed into the editor. */
+  | { type: 'TEST_EDIT'; selector: string; value: string; index?: number; everywhere?: boolean }
+  | { type: 'TEST_REVERT_EDITS' }
   | { type: 'TEST_COVER_SUGGESTIONS' }
   | { type: 'TEST_RESCAN' }
   /** Stop repositioning the fixed overlay (stands for compositor lag); in-page covers keep working. */

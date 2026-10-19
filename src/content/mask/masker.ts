@@ -2,6 +2,7 @@ import type { MaskMode } from '@/shared/types';
 import type { MutationHub } from './guard';
 import { MASK_ATTR, ensureMaskSheet, installMaskSheet } from './sheet';
 import { bullets, collectTextNodes, type TextRange } from './text-mask';
+import { editedPageText } from '../edit/page-text';
 import { StrictInputs, readValue, writeValue, type StrictOptions } from './strict-input';
 import {
   leaks,
@@ -89,8 +90,9 @@ function signatureOf(el: Element, mode: MaskMode): string {
     const srcs = mediaSources(el);
     return srcs.length ? srcs.map((s) => `${s.getAttribute('src')}|${s.getAttribute('srcset')}`).join(';') : el.outerHTML;
   }
+  // The page's own text, so a re-rendered twin matches whether or not a live edit shows on either side.
   return collectTextNodes(el)
-    .map((t) => t.data)
+    .map((t) => editedPageText(t) ?? t.data)
     .join('')
     .replace(/\s+/g, ' ')
     .trim();
@@ -156,6 +158,12 @@ export class Masker {
    * the rescan lands before any other task can read the raw text.
    */
   onStale: ((id: string) => void) | null = null;
+  /**
+   * What a masked node should count as its original: the user's live text
+   * edit when there is one (see TextEdits.view), so removing the sticker
+   * later never writes the page's real text back over the edit.
+   */
+  textView: ((t: Text, data: string) => string) | null = null;
 
   constructor(
     private hub: MutationHub,
@@ -554,7 +562,9 @@ export class Masker {
   /** What an attribute would have to repeat to leak this record's content. */
   private tokens(rec: MaskRecord): Tokens {
     if (rec.mode === 'input') return tokensOf([this.liveValue(rec), ...rec.texts.values()]);
-    return tokensOf(rec.texts.values());
+    // An edited node's record holds the edit; attributes can still repeat the page's own text.
+    const page = Array.from(rec.texts.keys(), (t) => editedPageText(t)).filter((s): s is string => s !== undefined);
+    return tokensOf([...rec.texts.values(), ...page]);
   }
 
   /**
@@ -720,6 +730,11 @@ export class Masker {
         this.forget(rec, p);
         if (p.parentNode && p.parentNode === parent) this.removeNode(p);
       }
+      // The page handed the whole text back: show it through a live edit, if one owns the node, before the rescan reads it.
+      if (split.original.isConnected) {
+        const v = this.view(split.original);
+        if (v !== split.original.data) this.writeText(split.original, v);
+      }
     } else if (intact) {
       for (const p of parts) {
         this.forget(rec, p);
@@ -764,10 +779,14 @@ export class Masker {
 
   private maskText(rec: MaskRecord, t: Text) {
     this.watchRoot(t);
-    if (!rec.texts.has(t)) rec.texts.set(t, t.data);
+    if (!rec.texts.has(t)) rec.texts.set(t, this.view(t));
     const masked = bullets(t.data);
     if (t.data !== masked) this.writeText(t, masked);
     else this.expectedText.set(t, masked);
+  }
+
+  private view(t: Text): string {
+    return this.textView ? this.textView(t, t.data) : t.data;
   }
 
   private writeText(t: Text, value: string) {
@@ -811,7 +830,7 @@ export class Masker {
         const rec = this.recordFor(t);
         if (!rec || rec.mode !== 'text') continue;
         if (this.expectedText.get(t) === t.data) continue; // our own write
-        rec.texts.set(t, t.data);
+        rec.texts.set(t, this.view(t));
         this.writeText(t, bullets(t.data));
       } else if (r.type === 'childList') {
         const removed = Array.from(r.removedNodes).filter((n) => !this.ownNodes.has(n));

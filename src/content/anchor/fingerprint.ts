@@ -4,6 +4,7 @@ import { syncHmac, type SyncHmac } from '@/shared/hmac-sync';
 import { buildCssPath, buildXPath, isIdentifierLike, isKeyword, isStableId, stableClasses, testId } from './selector';
 import { headingContext, labelInfo, normalizeContext, tableContext } from './context';
 import { toViewRect, viewToDoc } from './geometry';
+import { pageTextContent } from '../edit/page-text';
 
 /** The HMAC key is set once by the content script boot before any fingerprinting. */
 let hmacKey: CryptoKey | null = null;
@@ -102,7 +103,8 @@ export function fingerprintText(el: Element): string {
   if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement) {
     return el.value ?? '';
   }
-  return el.textContent ?? '';
+  // The page's own text: a live edit is gone after reload and must not change identity.
+  return pageTextContent(el);
 }
 
 /**
