@@ -10,9 +10,13 @@
  *
  * - `formdata` (fires for `new FormData(form)` and every native submission):
  *   the real value goes into that FormData object; the DOM stays masked.
- * - `submit` (trusted only): the real value sits in the element for the
- *   duration of the submit event, so submit handlers that read `.value` work,
- *   and is masked again when the event has finished propagating.
+ *   While the tab is locked, only the browser's own submission after an
+ *   uncancelled trusted `submit` gets it; any other FormData gets bullets.
+ * - `submit` (trusted only, not while locked): the real value sits in the
+ *   element for the duration of the submit event, so submit handlers that
+ *   read `.value` work, and is masked again when the event has finished
+ *   propagating. While locked it would hand the value to any script that
+ *   calls `form.requestSubmit()` and cancels in its own handler.
  * - peek: while the user holds the peek combo the field shows and holds the
  *   real value so it can be read and edited; whatever it holds when the peek
  *   ends becomes the new real value.
@@ -81,8 +85,12 @@ export class StrictInputs {
   private fields = new Map<StrictField, Entry>();
   private submitting = new Set<StrictField>();
   private submitTimer = 0;
+  /** Locked: trusted submit events of this task whose submission may still follow. */
+  private submissions = new Map<HTMLFormElement, Event>();
   private disposers: Array<() => void> = [];
   private trusted: (e: Event) => boolean;
+  /** The tab is locked (AI session, debugger, webdriver): real values go only into a real submission. */
+  locked = false;
 
   constructor(
     private writeAttr: (el: Element, attr: string, value: string | null) => void,
@@ -247,6 +255,15 @@ export class StrictInputs {
     // The browser fires this one itself; a script-made FormDataEvent carries
     // a FormData of the script's choosing and is not a submission.
     if (!form || !fd || !this.trusted(e)) return;
+    if (this.locked) {
+      // Only the entry list the browser builds right after an uncancelled
+      // trusted submit: not a FormData built during the submit event (by a
+      // handler that may cancel next), nor one built outside a submit.
+      const s = this.submissions.get(form);
+      if (!s || s.eventPhase !== Event.NONE) return;
+      this.submissions.delete(form);
+      if (s.defaultPrevented) return;
+    }
     for (const [el, entry] of Array.from(this.fields)) {
       if (el.form !== form || !el.name || el.disabled || entry.lifts.size) continue;
       // A value the page wrote since the last sync went into the entry list
@@ -271,6 +288,14 @@ export class StrictInputs {
     if (!this.trusted(e)) return;
     const form = e.target as HTMLFormElement | null;
     if (!form) return;
+    if (this.locked) {
+      // No lift. The submission's own formdata follows in this same task, if
+      // at all. Residual: a submission aborted without cancelling (the form
+      // detached by a later listener) leaves this for the rest of the task.
+      this.submissions.set(form, e);
+      setTimeout(() => this.submissions.clear(), 0);
+      return;
+    }
     for (const el of Array.from(this.fields.keys())) {
       if (el.form !== form) continue;
       this.lift(el, 'submit');

@@ -231,6 +231,8 @@ For input mode the mask sets `-webkit-text-security` (visual only), `tabindex=-1
 
 **Resolution (2026-09-30):** Narrowed. Strict input masking (`src/content/mask/strict-input.ts`, setting `strictInputs`, on while the tab is locked by default) swaps the live `.value` of covered text fields for bullets. The real value goes back only through the `formdata` event, a trusted `submit`, or peek. `FormData` and submit handlers still see it by design. See docs/LIMITATIONS.md item 1.
 
+**Update (2026-10-18):** Narrowed further while the tab is locked. The real value goes only into the FormData of a real submission, the one the browser builds right after an uncancelled trusted `submit`. `new FormData(form)` outside it, submit handlers (no lift while locked) and `form.submit()` get bullets, so `form.requestSubmit()` plus a cancelling handler no longer reads it. Unlocked behaviour is unchanged. Still open while locked: a script that lets a real submission go ahead and reads it (a `formdata` listener, or an `action` / `target` it can read).
+
 ### L3. A synthetic `contextmenu` event can retarget "Cover this element"
 
 **Where:** `src/content/index.ts:272-279`. A page can listen for the user's right-click and immediately dispatch a synthetic `contextmenu` on a decoy element. `contextTarget` then points at the decoy, and the menu covers the wrong element. **Fix:** `if (!e.isTrusted) return;`.
