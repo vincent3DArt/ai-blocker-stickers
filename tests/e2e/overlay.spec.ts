@@ -19,6 +19,40 @@ test.describe('M1 overlay + placement', () => {
     expect(near(px, STICKER_RGB)).toBe(true);
   });
 
+  test('the picker and the rectangle tool stay on for several stickers until Esc', async ({ page, ext }) => {
+    await page.goto('/static.html');
+    const count = async () => (await ext.state(page)).stickers.length;
+    const click = async (sel: string) => {
+      const b = await boxOf(page, sel);
+      await page.mouse.click(b.x + b.w / 2, b.y + b.h / 2);
+    };
+    await ext.send(page, { type: 'START_PICK' });
+    await click('#hdr-account');
+    await expect.poll(count).toBe(1);
+    await click('#ssn-cell');
+    await expect.poll(count).toBe(2);
+    // The same element again adds nothing.
+    await click('#ssn-cell');
+    await page.waitForTimeout(300);
+    expect(await count()).toBe(2);
+    // After Esc a click no longer places a sticker.
+    await page.keyboard.press('Escape');
+    await click('td.acct');
+    await page.waitForTimeout(300);
+    expect(await count()).toBe(2);
+
+    await ext.send(page, { type: 'START_RECT' });
+    for (const sel of ['td.acct', 'h1']) {
+      const b = await boxOf(page, sel);
+      await page.mouse.move(b.x + 2, b.y + 2);
+      await page.mouse.down();
+      await page.mouse.move(b.x + b.w - 2, b.y + b.h - 2, { steps: 4 });
+      await page.mouse.up();
+    }
+    await expect.poll(count).toBe(4);
+    for (const s of (await ext.state(page)).stickers) expect(s.status).toBe('resolved');
+  });
+
   test('follows window scroll and resize', async ({ page, ext }) => {
     await page.goto('/static.html');
     await ext.cover(page, '#bottom-account');

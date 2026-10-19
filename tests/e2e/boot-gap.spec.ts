@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Boot gap: how long, after the covered element exists in the DOM, its
  * secret can still be read from the page's own (MAIN) world before the mask
  * lands. A script injected at document start polls `innerText` every 10 ms
@@ -24,7 +24,7 @@ interface Gap {
 
 async function installProbe(page: Page) {
   await page.addInitScript((secret) => {
-    const bullets = 'â€¢'.repeat(secret.length);
+    const bullets = '•'.repeat(secret.length);
     const g = { seen: -1, leak: -1, samples: 0 };
     (window as unknown as { __gap: typeof g }).__gap = g;
     const sample = () => {

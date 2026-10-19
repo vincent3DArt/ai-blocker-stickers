@@ -164,7 +164,7 @@ test.describe('PDF viewer: nothing under a rectangle sticker leaks', () => {
 
     // 3: select all + copy.
     await page.locator('#page-1 .textLayer span').nth(5).click();
-    await page.keyboard.press('Control+A');
+    await page.keyboard.press('ControlOrMeta+A');
     const sel = await page.evaluate(() => getSelection()?.toString() ?? '');
     expect(sel).toContain(KEPT);
     expect(leaks(sel)).toEqual([]);
@@ -183,7 +183,7 @@ test.describe('PDF viewer: nothing under a rectangle sticker leaks', () => {
         }),
     );
     expect(leaks(copied)).toEqual([]);
-    await page.keyboard.press('Control+C');
+    await page.keyboard.press('ControlOrMeta+C');
     try {
       await ext.context.grantPermissions(['clipboard-read', 'clipboard-write']);
       const clip = await page.evaluate(() => navigator.clipboard.readText());

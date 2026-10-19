@@ -572,13 +572,15 @@ export async function boot(opts: BootOptions = {}): Promise<BootApi | undefined>
     picker = new Picker(host, isOurs, {
       onPick: async (el) => {
         const id = reattachId;
-        stopTools();
         if (id) {
+          stopTools();
           await session.reattach(id, el);
           toolbar.toast('Sticker re-attached');
         } else {
+          // The picker stays on for the next element until Esc; a second click on the same one adds nothing.
+          if (session.visible().some((v) => v.el === el)) return void toolbar.toast('Already covered.');
           await session.addElementSticker(el, 'manual');
-          toolbar.toast('Sticker placed. It follows this element.');
+          toolbar.toast('Sticker placed. Click another, or Esc to finish.');
         }
         positioner.flush();
       },
@@ -597,9 +599,9 @@ export async function boot(opts: BootOptions = {}): Promise<BootApi | undefined>
     toolbar.setActive('rect');
     rectDraw = new RectDraw(host, {
       onDraw: async (rect) => {
-        stopTools();
+        // Stays on for the next rectangle until Esc.
         await session.addRectSticker(rect);
-        toolbar.toast('Rectangle sticker placed.');
+        toolbar.toast('Rectangle sticker placed. Draw another, or Esc to finish.');
         positioner.flush();
       },
       onCancel: () => stopTools(),
