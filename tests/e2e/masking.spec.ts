@@ -368,6 +368,8 @@ test.describe('M3 DOM masking', () => {
     const scroll = () => page.evaluate(() => { document.getElementById('scroller')!.scrollTop = 140; });
     await scroll();
     const sub = await substringRect(page, '#dep-ssn', '111-22-3333');
+    // Run on into the empty line end, so the rect is not promoted to an element sticker for #dep-ssn.
+    sub.w *= 2;
     const made = await ext.rect(page, sub);
     expect(made.kind).toBe('rect');
     const before = await pageText(page);
