@@ -12,9 +12,9 @@ const POS_KEY = 'settings.toolbarPos';
 const HINT_KEY = 'settings.toolbarHint';
 
 const HINTS: Record<'pick' | 'rect' | 'idle', Array<string | [string]>> = {
-  pick: ['Hover an element and click to cover it. ', ['↑'], ' / ', ['↓'], ' parent or child, ', ['Esc'], ' cancels.'],
-  rect: ['Drag a box over anything to cover it. ', ['Esc'], ' cancels.'],
-  idle: ['Hover an element and click to cover it. ', ['Esc'], ' cancels.'],
+  pick: ['Hover an element and click to cover it. ', ['↑'], ' / ', ['↓'], ' parent or child, ', ['Esc'], ' finishes.'],
+  rect: ['Drag a box over anything to cover it. ', ['Esc'], ' finishes.'],
+  idle: ['Hover an element and click to cover it. ', ['Esc'], ' finishes.'],
 };
 
 function storage(): chrome.storage.LocalStorageArea | null {

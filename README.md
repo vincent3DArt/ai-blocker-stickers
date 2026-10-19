@@ -123,9 +123,11 @@ handle to move it; it remembers the spot. Hover a sticker for a small action bar
 the parent element, and where it applies.
 
 **Cover element.** Hover to highlight a candidate. Arrow keys expand the selection to the parent or
-shrink it back. Click to place the sticker.
+shrink it back. Click to place the sticker. The picker stays on, so you can cover several elements in
+a row; press `Esc` to finish.
 
-**Draw rectangle.** Drag a box over any region. Text under the box is masked too.
+**Draw rectangle.** Drag a box over any region. Text under the box is masked too. Draw as many boxes
+as you like; `Esc` finishes.
 
 **Cover selection.** Select text and press `Alt+Shift+C`. If the selection covers most of one
 element, you get an element sticker; otherwise you get a rectangle.
