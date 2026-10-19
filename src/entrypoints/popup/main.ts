@@ -116,8 +116,8 @@ function header(origin: string | null): { el: HTMLElement; setStatus(kind: Statu
 
 /**
  * AI session controls. Start runs inside the click's user gesture so the
- * permission prompts are allowed: all sites (stickers and the lock apply
- * everywhere) and, the first time, the optional debugger permission.
+ * permission prompt is allowed: all sites (stickers and the lock apply
+ * everywhere).
  */
 function sessionSection(session: SessionInfo | null, autoCount: number): HTMLElement {
   const box = h('section', { class: 'card session' });
@@ -157,14 +157,13 @@ function sessionSection(session: SessionInfo | null, autoCount: number): HTMLEle
     );
     return box;
   }
-  const needDebugger = !session.debuggerGranted;
   box.append(
     h('div', { class: 'session-head' }, icon('lock'), h('strong', {}, 'AI session')),
     h(
       'p',
       { class: 'lines' },
       'Locks peek, edit, pause and delete in every tab until you end it. ',
-      needDebugger ? 'Asks for all-sites access and the debugger permission, to spot AI agents. ' : 'Asks for access to all sites. ',
+      'Asks for access to all sites. ',
       h('a', { href: README_URL, target: '_blank', rel: 'noopener' }, 'Learn more'),
     ),
     h(
@@ -172,21 +171,20 @@ function sessionSection(session: SessionInfo | null, autoCount: number): HTMLEle
       {
         class: 'primary block',
         onclick: async () => {
-          // One prompt, requested before any other await so the gesture holds.
-          const request: chrome.permissions.Permissions = {};
-          if (!session.allSitesGranted) request.origins = ['*://*/*'];
-          if (needDebugger) request.permissions = ['debugger'];
+          // Requested before any other await so the gesture holds.
           let granted = session.allSitesGranted;
-          if (request.origins || request.permissions) {
+          let failed = '';
+          if (!granted) {
             try {
-              await chrome.permissions.request(request);
-            } catch {
-              /* declined or unavailable: the session still locks */
+              granted = await chrome.permissions.request({ origins: ['*://*/*'] });
+            } catch (e) {
+              failed = e instanceof Error ? e.message : String(e);
             }
-            granted = await chrome.permissions.contains({ origins: ['*://*/*'] });
           }
+          // Declined or failed, the session still locks every tab.
           await chrome.runtime.sendMessage({ type: 'START_SESSION', allSites: granted });
-          render();
+          await render();
+          if (failed) app.append(notice('error', `Could not get access to all sites (${failed}). The session locks, but stickers only apply on sites you enabled.`));
         },
       },
       icon('lock'),

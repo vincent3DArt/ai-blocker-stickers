@@ -51,7 +51,6 @@ export function installDemo(variant: string) {
     startedAt: locked ? now - 25 * 60_000 : undefined,
     keepAllSites: false,
     allSitesGranted: true,
-    debuggerGranted: false,
   };
 
   c.tabs.query = async () => [tab];

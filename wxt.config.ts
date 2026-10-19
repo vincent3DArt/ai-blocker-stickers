@@ -50,10 +50,9 @@ export default defineConfig({
       minimum_chrome_version: '120',
       // declarativeNetRequest: the opt-in "Always open PDFs in the sticker
       // viewer" redirect. No rule exists until the user turns it on.
-      permissions: ['storage', 'scripting', 'activeTab', 'contextMenus', 'alarms', 'declarativeNetRequest', ...(dev ? ['debugger'] : [])],
-      // Lets the AI-session lock see an attached debugger (a CDP-driven agent).
-      // Requested from the popup at the first session start; dev builds list it above.
-      optional_permissions: dev ? [] : ['debugger'],
+      // debugger: lets the AI-session lock see an attached debugger (a CDP-driven
+      // agent). Required, not optional: Chrome drops `debugger` from optional_permissions.
+      permissions: ['storage', 'scripting', 'activeTab', 'contextMenus', 'alarms', 'declarativeNetRequest', 'debugger'],
       optional_host_permissions: ['*://*/*'],
       // Development builds pre-authorise the local fixtures server so the e2e
       // suite and manual testing don't need the permission prompt.
