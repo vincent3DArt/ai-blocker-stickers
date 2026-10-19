@@ -316,7 +316,10 @@ only in content-script memory, in the isolated world, where page scripts cannot 
    peek. Forms still submit the real value. The setting is under **Settings** in the popup:
    *While locked* (default) turns it on only during an AI session or detected automation;
    *Always* and *Never* do what they say. You cannot weaken it while locked. Caveats:
-   - `new FormData(form)` and submit handlers still see the real value, on purpose.
+   - Unlocked, `new FormData(form)` and submit handlers still see the real value, on purpose.
+     While locked, only a real submission that nobody cancels gets it, so SPA forms that read
+     their fields in a submit handler and `fetch` send bullets. A script can still let a real
+     submission go ahead and read it (a `formdata` listener, or an `action` it controls).
    - Code that reads `.value` directly to send it (a fetch-style submit) gets bullets.
    - A value the page writes into the field is taken as the new real value and masked again.
      A page that reads `.value` and stores it (common in React controlled inputs) stores bullets

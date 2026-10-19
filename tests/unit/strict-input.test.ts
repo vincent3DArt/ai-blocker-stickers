@@ -132,6 +132,41 @@ describe('strict input masking', () => {
     }
   });
 
+  it('while locked, only the formdata of an uncancelled submit gets the real value', async () => {
+    const { form, ssn } = setup();
+    const m = strictMasker();
+    m.setLocked(true);
+    m.apply('a', ssn, 'input');
+    const submit = () => form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    expect(formDataOf(form).get('ssn')).toBe(BULLETS);
+    // requestSubmit() with a handler that reads, builds a FormData, then cancels: bullets everywhere.
+    let during = '';
+    let built: FormDataEntryValue | null = null;
+    const cancel = (e: Event) => {
+      during = ssn.value;
+      built = formDataOf(form).get('ssn');
+      e.preventDefault();
+    };
+    form.addEventListener('submit', cancel);
+    submit();
+    expect(during).toBe(BULLETS);
+    expect(built).toBe(BULLETS);
+    expect(formDataOf(form).get('ssn')).toBe(BULLETS);
+    form.removeEventListener('submit', cancel);
+    // Uncancelled: the browser's own formdata, right after the submit event, gets it once.
+    submit();
+    expect(formDataOf(form).get('ssn')).toBe(SSN);
+    expect(formDataOf(form).get('ssn')).toBe(BULLETS);
+    expect(ssn.value).toBe(BULLETS);
+    // A submit with no formdata after it leaves nothing for a later task.
+    submit();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(formDataOf(form).get('ssn')).toBe(BULLETS);
+    // Unlocked again: FormData gets the real value, as before.
+    m.setLocked(false);
+    expect(formDataOf(form).get('ssn')).toBe(SSN);
+  });
+
   it('adopts a value the page writes itself as the new real value', () => {
     const { form, ssn } = setup();
     const m = strictMasker();

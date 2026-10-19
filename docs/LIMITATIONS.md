@@ -27,12 +27,27 @@ close them by breaking the page.
      it gets bullets, and so does CDP (Playwright `inputValue()`,
      `Runtime.evaluate`). The field carries `data-aibs-strict="1"`. The real
      value stays in content-script memory, never in storage.
-   - `new FormData(form)` and every native submission get the real value. The
-     `formdata` event puts it into the FormData object, and the DOM stays
-     masked. A trusted `submit` event also puts it into the field while the
-     event propagates. So a submit handler that reads `.value` works, and so
-     does any script that builds a FormData. That is by design: the form has
-     to submit. A synthetic `submit` or `formdata` event gets nothing.
+   - Unlocked (`always`), `new FormData(form)` and every native submission
+     get the real value. The `formdata` event puts it into the FormData
+     object, and the DOM stays masked. A trusted `submit` event also puts it
+     into the field while the event propagates. So a submit handler that
+     reads `.value` works, and so does any script that builds a FormData.
+     That is by design: the form has to submit. A synthetic `submit` or
+     `formdata` event gets nothing.
+   - While locked, only a real submission gets the real value: the FormData
+     the browser builds right after a trusted `submit` that nobody cancelled.
+     `new FormData(form)` outside that, a FormData built or `.value` read
+     inside a submit handler, and `form.submit()` all get bullets. So a
+     script can't call `form.requestSubmit()`, read the value in its own
+     handler, and cancel. The cost: while locked, SPA-style forms that read
+     their fields in a submit handler, cancel and `fetch` send bullets.
+   - Still open while locked: a script that lets a real submission go ahead.
+     A `formdata` listener sees the FormData the browser is about to send,
+     and a script can point the form's `action` or `target` somewhere it can
+     read (a GET into a same-origin iframe). Either way the form really
+     submits and the page navigates. Also open: a submission aborted after
+     an uncancelled `submit` event (a later listener detaches the form)
+     leaves the next FormData of that form, in the same task, the real value.
    - Code that reads `.value` directly outside a submit event gets bullets,
      for example a button handler that `fetch`es the field values. That is the
      point of strict mode, but it also breaks such a page's submission.

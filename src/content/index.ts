@@ -368,6 +368,7 @@ export async function boot(opts: BootOptions = {}): Promise<BootApi | undefined>
     const mode = settings.strictInputs;
     let on = mode === 'always' || (mode === 'locked' && lock.locked);
     if (!on && lock.locked && masker.isStrict) on = true;
+    masker.setLocked(lock.locked);
     masker.setStrict(on);
   };
   updateStrict();
