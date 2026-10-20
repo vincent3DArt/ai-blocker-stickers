@@ -97,12 +97,31 @@ async function rawOrHmac(value: string | null | undefined): Promise<{ raw?: stri
   return { hmac: await attrHmacOf(value) };
 }
 
-/** Text used for the fingerprint: visible text, or the value for form controls. */
+/** The page's own text of a Text node we masked (Masker.originalText); set once at boot. */
+let originalOf: (t: Text) => string | undefined = () => undefined;
+export function setOriginalText(fn: (t: Text) => string | undefined) {
+  originalOf = fn;
+}
+
+/**
+ * Text used for the fingerprint: the value for form controls, otherwise
+ * `textContent` as the page wrote it, our bullets swapped back for the
+ * originals. A session auto-cover is masked before it is fingerprinted; a hash
+ * of its bullets would never match the page again.
+ * Labels deliberately stay blind to masks: they are stored as text, and
+ * covered text must never reach storage (types.ts).
+ */
 export function fingerprintText(el: Element): string {
   if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement) {
     return el.value ?? '';
   }
-  return el.textContent ?? '';
+  const raw = el.textContent ?? '';
+  // Every text mask writes bullets: text without one holds none of ours.
+  if (!raw.includes('•')) return raw;
+  const w = el.ownerDocument.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+  let s = '';
+  for (let n = w.nextNode(); n; n = w.nextNode()) s += originalOf(n as Text) ?? (n as Text).data;
+  return s;
 }
 
 /**

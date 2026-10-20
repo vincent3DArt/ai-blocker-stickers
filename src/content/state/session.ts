@@ -661,7 +661,7 @@ export class Session {
     const now = Date.now();
     const premasked = opts.id ? this.o.masker.rootOf(opts.id) : undefined;
     if (premasked?.isConnected) el = premasked;
-    const detector = detectorOf(premasked?.isConnected && opts.id ? this.o.masker.originals(opts.id) : this.rawText(el));
+    const detector = detectorOf(premasked?.isConnected && opts.id ? this.o.masker.originals(opts.id) : fingerprintText(el));
     const [anchor, urlScope, frame] = await Promise.all([buildFingerprint(el), defaultScope(pageLoc()), this.frameInfo()]);
     const scope = await this.withView(urlScope, el);
     const moved = opts.id ? this.o.masker.rootOf(opts.id) : undefined;
@@ -1109,7 +1109,7 @@ export class Session {
     // Text masks: the exact textContent the page wrote (originals joined with
     // spaces would not hash like the fingerprint for a multi-node element).
     // Input masks: the real value (strict mode holds bullets in `.value`).
-    const read = (maskId: string) => (rt.sticker.kind === 'element' && rt.sticker.maskMode !== 'text' ? this.o.masker.originals(maskId) : this.rawText(el));
+    const read = (maskId: string) => (rt.sticker.kind === 'element' && rt.sticker.maskMode !== 'text' ? this.o.masker.originals(maskId) : fingerprintText(el));
     if (el === rt.el && this.o.masker.has(id)) return read(id);
     const i = rt.ties.indexOf(el);
     if (i >= 0 && this.o.masker.has(`${id}::tie${i}`)) return read(`${id}::tie${i}`);
@@ -1215,7 +1215,7 @@ export class Session {
       // (a rect drawn on `body`) changes text all the time.
       if (s.kind === 'rect' && !fp.keyHmac) continue;
       const key = fp.keyHmac ? keyHmacSync(rt.el) : undefined;
-      const text = fp.textHmac && s.kind === 'element' ? textHmacSync(this.maskedText(rt, rt.el) ?? this.rawText(rt.el)) : undefined;
+      const text = fp.textHmac && s.kind === 'element' ? textHmacSync(this.maskedText(rt, rt.el) ?? fingerprintText(rt.el)) : undefined;
       // The text is the record itself: while it still matches, a missing or
       // changed key (the cell moved into a dialog) is no reason to move.
       const drifted = fp.textHmac && s.kind === 'element' ? text !== fp.textHmac : !!fp.keyHmac && key !== fp.keyHmac;
@@ -1455,7 +1455,7 @@ export class Session {
     if (s.kind !== 'element' || !rt.el) return false;
     const fp = s.anchor;
     if (!fp.textHmac) return false;
-    return textHmacSync(this.maskedText(rt, rt.el) ?? this.rawText(rt.el)) !== fp.textHmac;
+    return textHmacSync(this.maskedText(rt, rt.el) ?? fingerprintText(rt.el)) !== fp.textHmac;
   }
 
   private fastMatch(fp: ElementSticker['anchor'], el: Element): boolean {
@@ -1486,15 +1486,6 @@ export class Session {
       } else if (rt.status === 'resolved' && rt.auto) reattached++;
     }
     return { lost, reattached, backstop, firstLost };
-  }
-
-  /** `el.textContent` as the page wrote it: our bullets swapped back for the originals. */
-  private rawText(el: Element): string {
-    if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement) return fingerprintText(el);
-    const w = el.ownerDocument.createTreeWalker(el, NodeFilter.SHOW_TEXT);
-    let s = '';
-    for (let n = w.nextNode(); n; n = w.nextNode()) s += this.o.masker.originalText(n as Text) ?? (n as Text).data;
-    return s;
   }
 
   private anchoredByOther(el: Element, self: Runtime): boolean {

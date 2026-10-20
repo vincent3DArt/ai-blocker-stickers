@@ -1,8 +1,9 @@
 import { webcrypto } from 'node:crypto';
 import { beforeAll, describe, expect, it } from 'vitest';
 
-import { buildFingerprint, setFingerprintKey } from '@/content/anchor/fingerprint';
+import { buildFingerprint, setFingerprintKey, setOriginalText } from '@/content/anchor/fingerprint';
 import { resolveFingerprint } from '@/content/anchor/resolve';
+import { bullets } from '@/content/mask/text-mask';
 import { importKey, randomKeyB64 } from '@/shared/hmac';
 
 // jsdom has no WebCrypto subtle and (depending on the version) no CSS.escape.
@@ -93,6 +94,44 @@ describe('resolveFingerprint: identity beats position', () => {
     document.getElementById('client-ssn')!.textContent = '987-65-4321';
     const res = await resolveFingerprint(fp);
     expect(res?.el).toBe(document.getElementById('client-ssn'));
+  });
+});
+
+describe('fingerprints describe the page, not our masks', () => {
+  beforeAll(async () => {
+    polyfill();
+    setFingerprintKey(await importKey(randomKeyB64()));
+  });
+
+  it('hashes the page text through our masks, and never stores a covered neighbour as the label', async () => {
+    // A pdf.js text layer: one span per line, the label is the line above.
+    const markup = `<div class="textLayer"><span>Client intake form</span><br><span>Name: Jordan Example</span><br><span>SSN 123-45-6789</span></div>`;
+    document.body.innerHTML = markup;
+    const target = () => document.querySelectorAll('span')[2];
+    const plain = await buildFingerprint(target());
+    expect(plain.labelContext).toBe('jordan example');
+
+    // Mask both spans the way the masker does, and record the originals.
+    const originals = new Map<Text, string>();
+    for (const span of Array.from(document.querySelectorAll('span')).slice(1)) {
+      const t = span.firstChild as Text;
+      originals.set(t, t.data);
+      t.data = bullets(t.data);
+    }
+    setOriginalText((t) => originals.get(t));
+    let masked;
+    try {
+      masked = await buildFingerprint(target());
+    } finally {
+      setOriginalText(() => undefined);
+    }
+    expect(masked.textHmac).toBe(plain.textHmac);
+    expect(JSON.stringify(masked)).not.toContain('jordan');
+
+    // Unmasked again (the neighbour's sticker deleted, a reload): still found by its text.
+    document.body.innerHTML = markup;
+    const res = await resolveFingerprint(masked);
+    expect(res?.el).toBe(target());
   });
 });
 

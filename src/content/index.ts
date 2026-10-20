@@ -32,7 +32,7 @@ import { Peek, type PeekTarget } from './overlay/peek';
 import { InPageCovers } from './overlay/in-page-cover';
 import { MutationHub } from './mask/guard';
 import { Masker } from './mask/masker';
-import { setFingerprintKey } from './anchor/fingerprint';
+import { setFingerprintKey, setOriginalText } from './anchor/fingerprint';
 import { SiteStore } from './state/store';
 import { Session } from './state/session';
 import { SpaNav } from './state/spa-nav';
@@ -232,6 +232,7 @@ export async function boot(opts: BootOptions = {}): Promise<BootApi | undefined>
   const isOurs = (n: Node | null) => host.isOurs(n) || covers.isOurs(n);
   const masker = new Masker(hub);
   masker.start();
+  setOriginalText((t) => masker.originalText(t));
 
   let tabState: TabState = { ...DEFAULT_TAB_STATE };
   let scanner: Scanner | undefined;

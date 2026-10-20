@@ -23,12 +23,12 @@ async function waitReady(page: Page) {
   await expect(page.locator('body')).toHaveAttribute('data-state', 'ready', { timeout: 20_000 });
 }
 
-/** CSS selector of the text-layer span holding the SSN. */
-async function ssnSelector(page: Page): Promise<string> {
+/** CSS selector of the page-1 text-layer span holding `needle` (the SSN by default). */
+async function spanSelector(page: Page, needle = SSN): Promise<string> {
   const i = await page.evaluate((needle) => {
     const kids = Array.from(document.querySelectorAll('#page-1 .textLayer > *'));
     return kids.findIndex((k) => k.textContent?.includes(needle));
-  }, SSN);
+  }, needle);
   expect(i).toBeGreaterThanOrEqual(0);
   return `#page-1 > .textLayer > :nth-child(${i + 1})`;
 }
@@ -70,7 +70,7 @@ test.describe('PDF viewer', () => {
     await expect(page.locator('#page-2 .textLayer')).toContainText('engagement letter');
 
     // Element sticker on the SSN span of the text layer.
-    await ext.cover(page, await ssnSelector(page));
+    await ext.cover(page, await spanSelector(page));
     // Rectangle sticker over page 2's paragraph (canvas + text layer).
     await page.evaluate(() => document.getElementById('page-2')!.scrollIntoView({ block: 'start' }));
     const p2 = await boxOf(page, '#page-2');
@@ -134,7 +134,7 @@ test.describe('PDF viewer', () => {
 
   test('vector mode keeps the text: labelled as not a redaction', async ({ page, ext }) => {
     await openViewer(page, ext, 'sample.pdf');
-    await ext.cover(page, await ssnSelector(page));
+    await ext.cover(page, await spanSelector(page));
     await expect(page.locator('label.vector')).toContainText('not a true redaction');
     await page.check('#vector');
     const [dl] = await Promise.all([page.waitForEvent('download'), page.click('#download')]);
@@ -153,7 +153,7 @@ test.describe('PDF viewer', () => {
 
   test('zoom: stickers stay on their text and region', async ({ page, ext }) => {
     await openViewer(page, ext, 'sample.pdf');
-    const sel = await ssnSelector(page);
+    const sel = await spanSelector(page);
     await ext.cover(page, sel);
     const p1 = await boxOf(page, '#page-1');
     const s = p1.w / 612;
@@ -184,6 +184,40 @@ test.describe('PDF viewer', () => {
       .toContain('ssn');
   });
 
+  test('a kept session auto-cover comes back after a reload once the sticker next to it is gone', async ({ page, ext }) => {
+    test.setTimeout(60_000);
+    await ext.worker.evaluate(() => chrome.storage.local.remove('aibsNoScan'));
+    await openViewer(page, ext, 'sample.pdf');
+    // A manual sticker on the line above the SSN: its text is masked while
+    // the session auto-covers the SSN.
+    const name = await ext.cover(page, await spanSelector(page, 'Jordan'));
+    const ctl = await ext.context.newPage();
+    await ctl.goto(`chrome-extension://${new URL(ext.worker.url()).host}/popup.html`);
+    // The viewer is an extension page too and answers TEST_* first, so the
+    // background's reply is lost: wait for the lock instead.
+    const session = async (active: boolean) => {
+      await ctl.evaluate((a) => chrome.runtime.sendMessage({ type: 'TEST_SESSION', active: a, keepAuto: true }), active);
+      await expect.poll(async () => (await ext.state(page)).lock?.locked, { timeout: 5000 }).toBe(active);
+    };
+    await session(true);
+    await expect.poll(async () => (await ext.state(page)).scan?.autoCount ?? 0, { timeout: 10_000 }).toBeGreaterThanOrEqual(1);
+    await session(false);
+    const key = `site:chrome-extension://${new URL(ext.worker.url()).host}`;
+    const stored = () =>
+      ext.worker.evaluate(async (k) => ((await chrome.storage.local.get(k))[k] as { stickers: { id: string; source: string }[] } | undefined)?.stickers ?? [], key);
+    await expect.poll(async () => (await stored()).filter((s) => s.source === 'session-auto').length, { timeout: 5000 }).toBe(1);
+    // The covered name never reaches storage as the auto-cover's label.
+    expect(JSON.stringify(await stored()).toLowerCase()).not.toContain('jordan');
+    await ctl.close();
+
+    await ext.send(page, { type: 'DELETE_STICKER', id: name });
+    await expect.poll(async () => (await stored()).map((s) => s.source)).toEqual(['session-auto']);
+    await page.reload();
+    await waitReady(page);
+    await expect.poll(async () => (await ext.state(page)).stickers.map((s) => s.status), { timeout: 5000 }).toEqual(['resolved']);
+    expect(await page.evaluate(() => document.body.innerText)).not.toContain(SSN);
+  });
+
   test('popup offers the viewer on a PDF tab; no PDF stickers leak into storage', async ({ page, ext }) => {
     // Headless browsers download a PDF instead of showing it, so the popup
     // is shown a real tab that claims the PDF's URL.
@@ -206,7 +240,7 @@ test.describe('PDF viewer', () => {
     // What the viewer stores for a document: geometry and the scope key only.
     const viewer = await ext.context.newPage();
     await openViewer(viewer, ext, 'sample.pdf');
-    await ext.cover(viewer, await ssnSelector(viewer));
+    await ext.cover(viewer, await spanSelector(viewer));
     const stored = await ext.worker.evaluate(async (key) => JSON.stringify((await chrome.storage.local.get(key))[key] ?? null), `site:chrome-extension://${id}`);
     expect(stored).toContain('/pdf/');
     expect(stored).not.toContain(SSN);
