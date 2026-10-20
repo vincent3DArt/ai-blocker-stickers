@@ -83,6 +83,42 @@ async function waitPainted(page: Page, pageNo: number) {
   await expect.poll(() => page.evaluate((n) => document.querySelector<HTMLCanvasElement>(`#page-${n} canvas`)!.width, pageNo), { timeout: 20_000 }).toBeGreaterThan(300);
 }
 
+/** Selector of the page-1 text-layer span containing `needle`. */
+async function spanSelector(page: Page, needle: string): Promise<string> {
+  const i = await page.evaluate((n) => Array.from(document.querySelectorAll('#page-1 .textLayer > *')).findIndex((k) => k.textContent?.includes(n)), needle);
+  expect(i).toBeGreaterThanOrEqual(0);
+  return `#page-1 > .textLayer > :nth-child(${i + 1})`;
+}
+
+/**
+ * Ink inside a box of page 1's canvas (PDF points, 612-wide pages): the share of dark pixels, the top
+ * and bottom rows that have any (in points), and the dark/light bitmap to tell whether anything changed.
+ */
+async function ink(page: Page, b: { x: number; y: number; w: number; h: number }) {
+  return page.evaluate((b) => {
+    const c = document.querySelector<HTMLCanvasElement>('#page-1 canvas')!;
+    const s = c.width / 612;
+    const [x, y, w, h] = [Math.round(b.x * s), Math.round(b.y * s), Math.round(b.w * s), Math.round(b.h * s)];
+    const d = c.getContext('2d')!.getImageData(x, y, w, h).data;
+    let dark = 0;
+    let top = -1;
+    let bottom = -1;
+    let bits = '';
+    for (let row = 0; row < h; row++) {
+      for (let col = 0; col < w; col++) {
+        const i = (row * w + col) * 4;
+        const on = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2] < 128;
+        bits += on ? '1' : '0';
+        if (!on) continue;
+        dark++;
+        if (top < 0) top = row;
+        bottom = row;
+      }
+    }
+    return { frac: dark / (w * h), top: b.y + top / s, bottom: b.y + bottom / s, bits };
+  }, b);
+}
+
 /** sample.pdf page 1: "SSN 123-45-6789" in 14pt Helvetica at x=72pt, baseline 172pt from the top; the digits end near x=179pt. */
 const OLD_DIGITS = { x: 152, y: 162, w: 28, h: 12 };
 const NEW_WORDS = { x: 72, y: 162, w: 40, h: 12 };
@@ -204,6 +240,36 @@ test.describe('PDF viewer', () => {
     expect((await ext.state(page)).edits?.count).toBe(0);
     await expect.poll(() => darkest(page, 1, OLD_DIGITS), { timeout: 10_000 }).toBeGreaterThan(200);
     expect(await darkest(page, 1, NEW_WORDS)).toBeLessThan(120);
+  });
+
+  test('edit text matches the PDF font: the new words have the weight, size and baseline of the original', async ({ page, ext }) => {
+    await openViewer(page, ext, 'resume.pdf');
+    await waitPainted(page, 1);
+    // "JANE Q. EXAMPLE": Helvetica-Bold 26pt, centred, baseline 62pt from the top.
+    const sel = await spanSelector(page, 'JANE Q. EXAMPLE');
+    const box = await page.evaluate((sel) => {
+      const el = document.querySelector(sel)!;
+      const lr = el.closest('.textLayer')!.getBoundingClientRect();
+      const r = el.getBoundingClientRect();
+      const k = 612 / lr.width;
+      return { x: (r.left - lr.left) * k, y: (r.top - lr.top) * k, w: r.width * k, h: r.height * k };
+    }, sel);
+    const area = { x: box.x - 4, y: box.y - box.h * 0.5, w: box.w + 8, h: box.h * 2 };
+    const before = await ink(page, area);
+    expect(before.frac).toBeGreaterThan(0.05);
+
+    // Same length, one letter changed: the whole line is redrawn in the document's own bold font.
+    expect(await ext.send(page, { type: 'TEST_EDIT', selector: sel, value: 'JANE X. EXAMPLE' })).toMatchObject({ ok: true });
+    const after = await ink(page, area);
+    let changed = 0;
+    for (let i = 0; i < before.bits.length; i++) if (before.bits[i] !== after.bits[i]) changed++;
+    expect(changed).toBeGreaterThan(20);
+    // The document's font gives ~0.99 of the original ink; the stand-in font gives ~0.74. The wrong size or
+    // baseline would move the ink's edges.
+    expect(after.frac / before.frac).toBeGreaterThan(0.9);
+    expect(after.frac / before.frac).toBeLessThan(1.1);
+    expect(Math.abs(after.top - before.top)).toBeLessThanOrEqual(1.5);
+    expect(Math.abs(after.bottom - before.bottom)).toBeLessThanOrEqual(1.5);
   });
 
   test('edit text: vector download refused, a sticker over an edit wins, viewer chrome is not editable', async ({ page, ext }, info) => {

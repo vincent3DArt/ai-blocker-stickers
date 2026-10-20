@@ -150,6 +150,10 @@ async function renderTextLayer(pv: PageView): Promise<void> {
   tl.textDivs.forEach((div, i) => {
     const it = items[i];
     if (!it || !it.str) return;
+    // For live edits: the font pdf.js loaded for this text (its FontFace family) and the baseline in page points.
+    const { fontName, transform } = it as { fontName?: string; transform?: number[] };
+    if (fontName) div.dataset.font = fontName;
+    if (transform) div.dataset.baseline = pv.base.convertToViewportPoint(transform[4], transform[5])[1].toFixed(2);
     const scaleX = Number(div.style.getPropertyValue('--scale-x')) || 0;
     if (!(scaleX > 0)) return;
     const vertical = content.styles[(it as { fontName?: string }).fontName ?? '']?.vertical;
@@ -352,9 +356,40 @@ function editsOn(pv: PageView, all = engine?.editedText() ?? []): PageEdit[] {
     const b = toPt(span.getBoundingClientRect());
     // --font-height is in PDF points; the box of a span edited to nothing has no height.
     const h = parseFloat(span.style.getPropertyValue('--font-height')) || b.h;
-    const scaleX = Number(span.style.getPropertyValue('--scale-x')) || 1;
-    return { page: pv.index, x: b.x, y: b.y, w: b.w, h, text, family: span.style.fontFamily || 'sans-serif', scaleX, pad: editPad({ ...b, h }, h, others) };
+    const fallback = span.style.fontFamily || 'sans-serif';
+    const font = documentFont(pv, span.dataset.font);
+    const baseline = parseFloat(span.dataset.baseline ?? '');
+    return {
+      page: pv.index,
+      x: b.x,
+      y: b.y,
+      w: b.w,
+      h,
+      text,
+      // The document's own font when pdf.js loaded it; characters its subset lacks fall back per glyph.
+      family: font.loaded ? `"${span.dataset.font}", ${fallback}` : fallback,
+      style: font.style,
+      // pdf.js's scale fits the stand-in font to the real glyph widths; the real font needs none.
+      scaleX: font.loaded ? 1 : Number(span.style.getPropertyValue('--scale-x')) || 1,
+      baseline: Number.isFinite(baseline) ? baseline : undefined,
+      pad: editPad({ ...b, h }, h, others),
+    };
   });
+}
+
+/**
+ * The PDF font behind a text-layer span: whether pdf.js registered it as a
+ * loaded FontFace in this page (Type3 and failed fonts are drawn by pdf.js
+ * itself and are not), and its weight and slant for the fallback glyphs.
+ */
+function documentFont(pv: PageView, id: string | undefined): { loaded: boolean; style: string } {
+  if (!id) return { loaded: false, style: '' };
+  let loaded = false;
+  for (const f of document.fonts) if (f.status === 'loaded' && f.family.replace(/^["']|["']$/g, '') === id) loaded = true;
+  const objs = pv.page.commonObjs;
+  const info = objs.has(id) ? (objs.get(id) as { bold?: boolean; black?: boolean; italic?: boolean }) : null;
+  const style = [info?.italic ? 'italic' : '', info?.bold || info?.black ? 'bold' : ''].filter(Boolean).join(' ');
+  return { loaded, style };
 }
 
 /** Repaint pages whose edits changed: at once on the canvas shown, then a clean re-render drops anything an edit no longer covers. */

@@ -36,6 +36,10 @@ export interface PageEdit extends PageRect {
   scaleX: number;
   /** Cover padding in points (top, right, bottom, left); without it, a fixed share of the font size. */
   pad?: { t: number; r: number; b: number; l: number };
+  /** CSS font-style/weight words for the new text ("italic bold"), from the PDF font. */
+  style?: string;
+  /** The original text's baseline, in points from the page top; without it, derived from the stand-in font's ascent. */
+  baseline?: number;
 }
 
 /**

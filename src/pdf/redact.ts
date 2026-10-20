@@ -46,15 +46,18 @@ export function paintEdits(ctx: CanvasRenderingContext2D, edits: PageEdit[], sca
   for (const { e, colors } of jobs) {
     if (!e.text.trim()) continue;
     ctx.save();
-    ctx.font = `${e.h * scale}px ${e.family}`;
-    // pdf.js places a span's top at baseline − ascent, with the ascent ratio of the same stand-in font.
-    const m = ctx.measureText(e.text);
-    const total = m.fontBoundingBoxAscent + m.fontBoundingBoxDescent;
-    const ratio = total > 0 ? m.fontBoundingBoxAscent / total : 0.8;
+    ctx.font = `${e.style ? e.style + ' ' : ''}${e.h * scale}px ${e.family}`;
+    let baseline = e.baseline;
+    if (baseline === undefined) {
+      // pdf.js places a span's top at baseline − ascent, with the ascent ratio of the same stand-in font.
+      const m = ctx.measureText(e.text);
+      const total = m.fontBoundingBoxAscent + m.fontBoundingBoxDescent;
+      baseline = e.y + (total > 0 ? m.fontBoundingBoxAscent / total : 0.8) * e.h;
+    }
     const sx = e.scaleX > 0 ? e.scaleX : 1;
     ctx.fillStyle = colors.fg;
     ctx.textBaseline = 'alphabetic';
-    ctx.translate(e.x * scale, (e.y + ratio * e.h) * scale);
+    ctx.translate(e.x * scale, baseline * scale);
     ctx.scale(sx, 1);
     ctx.fillText(e.text, 0, 0, (e.w * scale) / sx);
     ctx.restore();

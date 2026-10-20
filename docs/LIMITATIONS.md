@@ -428,13 +428,15 @@ demos and for swapping a name before an agent looks, not a sticker.
 48. **Reverting text under a sticker.** Revert does not rewrite text a
     sticker currently covers; when that sticker is later deleted, the edited
     text comes back, not the page's original.
-49. **PDF edits look patched on.** The new words use pdf.js's stand-in font
-    family (serif, sans-serif or monospace), not the PDF's own font, and bold
-    or italic is not matched. The cover is one flat colour sampled around the
+49. **PDF edits can look patched on.** The new words are drawn in the PDF's
+    own font when pdf.js loaded it, at its size and on its baseline, in the
+    colour of the original ink. Embedded fonts are often subsets: a character
+    the document never used falls back to pdf.js's stand-in family (bold or
+    italic like the original). Fonts pdf.js draws itself (Type3) use the
+    stand-in throughout. The cover is one flat colour sampled around the
     text, so it shows over images, gradients or watermarks. Longer text is
     squeezed into the original width; right-to-left text is drawn
-    left-aligned, and in CJK documents the new words can sit slightly off the
-    original baseline.
+    left-aligned.
 50. **What a PDF edit can reach.** One edit changes one text-layer span (pdf.js
     often splits a line into several). Rotated text, rotated pages and spans
     pdf.js did not size (single characters) cannot be edited; cover them with
