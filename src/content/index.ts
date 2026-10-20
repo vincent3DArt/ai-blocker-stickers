@@ -201,12 +201,13 @@ export async function boot(opts: BootOptions = {}): Promise<BootApi | undefined>
   if (import.meta.env.DEV && devLocal.aibsFailBoot === true) throw new Error('simulated boot failure (dev)');
   let settings: Settings = settingsLoaded;
   // The PDF viewer (the only extension page running the engine) follows "Remember stickers on PDFs".
-  // Never turned off while locked (stickers would stop surviving a reload mid-session): applied when the lock ends.
-  const syncRemember = (locked: boolean) => {
-    const want = !extensionPage || settings.rememberPdfStickers;
-    if (want || !locked) store.remember = want;
+  // Off, its stickers stay in memory and in the tab's sessionStorage: a reload keeps them (an agent's
+  // mid-session too), closing the tab drops them.
+  if (extensionPage) store.useTabMemory(sessionStorage);
+  const syncRemember = () => {
+    store.remember = !extensionPage || settings.rememberPdfStickers;
   };
-  syncRemember(false);
+  syncRemember();
   // The host is mounted before the key import so the boot cloak can come off
   // the moment storage says nothing here needs covering.
   const host = mountHost();
@@ -362,8 +363,9 @@ export async function boot(opts: BootOptions = {}): Promise<BootApi | undefined>
   const currentLock = (): LockState =>
     computeLock({ debuggerAttached: bgLock.debugger, manualSession: bgLock.manual || localSession, webdriver: webdriver() });
   let lock: LockState = currentLock();
-  session.setLocked(lock.locked);
+  // Before setLocked, whose state report must already say locked (the background waits on it).
   tabState = { ...tabState, locked: lock.locked, lockReason: lock.reason };
+  session.setLocked(lock.locked);
 
   /**
    * Strict input masking follows the setting: always, never, or (default)
@@ -903,7 +905,6 @@ export async function boot(opts: BootOptions = {}): Promise<BootApi | undefined>
       toolbar.hide();
     }
     session.setLocked(lock.locked);
-    syncRemember(lock.locked);
     updateStrict();
     // Locked: no suggestion is ever drawn, detections are covered instead.
     if (lock.locked) suggestView?.clear();
@@ -1215,7 +1216,7 @@ export async function boot(opts: BootOptions = {}): Promise<BootApi | undefined>
     if (area === 'local' && changes.settings?.newValue) {
       const prev = settings;
       settings = normalizeSettings(changes.settings.newValue as Partial<Settings>);
-      syncRemember(lock.locked);
+      syncRemember();
       host.setColor(settings.appearance.color);
       updateStrict();
       sendState({ strictInputs: masker.strictCount() });

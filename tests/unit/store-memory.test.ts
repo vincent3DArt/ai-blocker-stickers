@@ -65,15 +65,57 @@ describe('SiteStore with remember off (PDF viewer, "Remember stickers on PDFs")'
     expect(store.active('/pdf/abcdefghijklmnop', 0).map((s) => s.id)).toEqual(['auto']);
   });
 
-  it('turned back on, the stickers placed meanwhile are saved', async () => {
+  it('turned back on, the stickers placed meanwhile stay in memory; new ones are saved', async () => {
     store = await open();
     store.remember = false;
     store.upsert(sticker('meanwhile'));
     store.remember = true;
+    store.upsert(sticker('after'));
     await settle();
-    expect(set).toHaveBeenCalled();
-    expect(store.isTemporary('meanwhile')).toBe(false);
-    expect(store.all.map((s) => s.id)).toEqual(['meanwhile']);
+    expect(store.isTemporary('meanwhile')).toBe(true);
+    expect(store.all.map((s) => s.id)).toEqual(['after']);
+  });
+
+  /** sessionStorage of one tab. */
+  const tabMemory = () => {
+    const m = new Map<string, string>();
+    return { getItem: (k: string) => m.get(k) ?? null, setItem: (k: string, v: string) => void m.set(k, v), removeItem: (k: string) => void m.delete(k), size: () => m.size } as unknown as Storage & { size(): number };
+  };
+
+  it('memory-only stickers are kept in the tab memory: the next page of the tab (a reload) restores them', async () => {
+    const mem = tabMemory();
+    store = await open();
+    store.useTabMemory(mem);
+    store.remember = false;
+    store.upsert(sticker('placed'));
+    store.addEphemeral({ ...sticker('auto'), source: 'session-auto' } as Sticker);
+    store.keepEphemeral();
+    store.destroy();
+
+    store = await open();
+    store.useTabMemory(mem);
+    store.remember = false;
+    expect(store.active('/pdf/abcdefghijklmnop', 0).map((s) => s.id).sort()).toEqual(['auto', 'placed']);
+    expect(store.isTemporary('placed')).toBe(true);
+    store.remove('placed');
+    store.remove('auto');
+    expect(mem.size()).toBe(0);
+    await settle();
+    expect(set).not.toHaveBeenCalled();
+  });
+
+  it('the tab memory leaves out a sticker the privacy guard rejects, and one that is saved meanwhile', async () => {
+    const mem = tabMemory();
+    store = await open();
+    store.useTabMemory(mem);
+    store.remember = false;
+    store.upsert({ ...sticker('leaky'), label: 'SSN 123-45-6789' } as Sticker);
+    store.upsert(sticker('fine'));
+    store.destroy();
+    store = await open([sticker('fine')]);
+    store.useTabMemory(mem);
+    expect(store.isTemporary('leaky')).toBe(false);
+    expect(store.isTemporary('fine')).toBe(false);
   });
 
   it('remembers by default', async () => {

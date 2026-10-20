@@ -389,7 +389,8 @@ export interface Settings {
   catalog?: Record<string, boolean>;
   /**
    * Stickers placed in the PDF viewer are saved for the document (default).
-   * Off: they last until the viewer closes; stickers already saved stay until removed.
+   * Off: they last until the viewer's tab closes (a reload keeps them), and the background deletes the
+   * saved ones once no viewer is locked.
    */
   rememberPdfStickers: boolean;
 }

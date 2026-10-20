@@ -1089,8 +1089,15 @@ function pdfSettingsFieldset(settings: Settings, locked = false): HTMLElement {
         disabled: locked,
         title: locked ? 'Locked: change this after the AI session ends' : '',
         onchange: async (e: Event) => {
+          const box = e.target as HTMLInputElement;
+          // Off deletes the viewer's saved stickers (the background does it): the viewer shares this page's origin.
+          const saved = box.checked ? 0 : ((await loadSite(location.origin))?.stickers.length ?? 0);
+          if (saved && !confirm(`Delete ${saved === 1 ? 'the saved PDF sticker' : `all ${saved} saved PDF stickers`}? They also come off any open PDF. While a viewer is locked (AI session or automation), this waits until the lock ends. Once deleted, they can't be restored.`)) {
+            box.checked = true;
+            return;
+          }
           const cur = await loadSettings();
-          await saveSettings({ ...cur, rememberPdfStickers: (e.target as HTMLInputElement).checked });
+          await saveSettings({ ...cur, rememberPdfStickers: box.checked });
         },
       }),
       'Remember stickers on PDFs',
@@ -1098,7 +1105,7 @@ function pdfSettingsFieldset(settings: Settings, locked = false): HTMLElement {
     h(
       'span',
       { class: 'explain' },
-      'On: stickers come back when you open the same file again. Off: stickers you place in the viewer last until you close or reload it. Stickers already saved stay until you remove them.',
+      'On: stickers come back when you open the same file again. Off: saved PDF stickers are deleted, and stickers you place in the viewer last until you close its tab.',
     ),
   );
   return box;

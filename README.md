@@ -276,9 +276,12 @@ while locked). Stickers belong to one document: they are keyed by the first
 16 hex digits of the file's SHA-256, so they come back when you open the same file again, from any
 URL or from disk, and never appear on a different file. To stop that, turn off
 **Settings → PDFs → Remember stickers on PDFs**: stickers you place in the viewer then last until
-you close or reload it, like text edits, so leave it on if an agent may reload the tab. Stickers
-already saved stay until you remove them, and turning the setting back on saves the ones placed
-meanwhile. It cannot be turned off during an AI session.
+you close its tab. They are kept in that tab's session storage, so a reload (an agent's included)
+still finds them, and no other tab sees them. Turning it off deletes every saved PDF sticker, for
+all documents, after asking; they also come off any PDF open at the time. While an AI session runs
+or any viewer tab is locked (a debugger or automation attached), the deletion waits until that
+ends. Stickers placed while it was off stay in their tab until it closes, even if you turn it back
+on. It cannot be turned off during an AI session.
 
 **Download redacted PDF.** The toolbar button builds a new file, named `<original>-redacted.pdf`.
 By default every page is re-rendered at twice its size, the stickers are painted into the pixels as
@@ -294,9 +297,10 @@ selected, copied and extracted. It is off by default and refused while the tab i
 
 **What the viewer stores and sends.** It downloads the PDF you opened and nothing else: pdf.js's
 worker, CMaps, standard fonts and image decoders are packaged with the extension, and none of them
-is fetched from a CDN. Storage gets the document key and the stickers' geometry (nothing new
-while **Remember stickers on PDFs** is off). The file name, the URL and the document's text are
-never stored.
+is fetched from a CDN. Storage gets the document key and the stickers' geometry (none while
+**Remember stickers on PDFs** is off, once any wait for a lock is over: the stickers placed then are
+kept in that tab's session storage, which Chrome drops when the tab closes). The file name, the URL
+and the document's text are never stored.
 
 ## What the AI sees
 
