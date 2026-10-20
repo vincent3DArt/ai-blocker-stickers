@@ -218,6 +218,52 @@ describe('TextEdits', () => {
   });
 });
 
+describe('TextEdits.shownText / forget (PDF viewer)', () => {
+  it('shownText is the edit, also under a sticker', () => {
+    const { edits, masker } = setup('<p id="p">Zelda Quarry</p>');
+    const t = text('#p');
+    expect(edits.shownText(t)).toBeUndefined();
+    edits.edit(t, 'Jane Doe', false);
+    masker.apply('s1', document.querySelector('#p')!, 'text');
+    expect(edits.shownText(t)).toBe('Jane Doe');
+  });
+
+  it('forget drops everything without writing back, also while locked, and follows nothing afterwards', async () => {
+    const { edits } = setup('<p id="p">Zelda Quarry</p><p id="q"></p>');
+    const t = text('#p');
+    edits.edit(t, 'Jane Doe', false);
+    edits.setLocked(true);
+    edits.forget();
+    expect(edits.count).toBe(0);
+    expect(edits.managing).toBe(false);
+    expect(t.data).toBe('Jane Doe');
+    document.querySelector('#q')!.textContent = 'Zelda Quarry';
+    await settle();
+    expect(document.querySelector('#q')!.textContent).toBe('Zelda Quarry');
+  });
+});
+
+describe('TextEdits without attribute mirroring (PDF viewer)', () => {
+  it('leaves attributes alone, so a run like "0" cannot rewrite data-main-rotation="0"', async () => {
+    document.body.innerHTML = '<div class="textLayer" data-main-rotation="0"><span id="s" title="Total 0.00">Total 0.00</span></div>';
+    const hub = new MutationHub();
+    hub.start();
+    const edits = new TextEdits(hub, () => false, false);
+    edits.start();
+    cleanup.push(() => {
+      edits.stop();
+      hub.stop();
+    });
+    const t = document.querySelector('#s')!.firstChild as Text;
+    edits.edit(t, 'Total 5.00', false);
+    expect(t.data).toBe('Total 5.00');
+    expect(document.querySelector('.textLayer')!.getAttribute('data-main-rotation')).toBe('0');
+    expect(document.querySelector('#s')!.getAttribute('title')).toBe('Total 0.00');
+    expect(edits.revertAll()).toBe(true);
+    expect(t.data).toBe('Total 0.00');
+  });
+});
+
 describe('TextEdits with the Masker', () => {
   it('a sticker over an edited node captures the edit, never the original', async () => {
     const { edits, masker } = setup('<p id="p">Zelda Quarry</p>');

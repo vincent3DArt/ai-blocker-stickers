@@ -107,6 +107,12 @@ export interface BootOptions {
   pagePath?: () => string;
   /** The page is DOM text by construction: skip canvas-page detection. */
   forceDom?: boolean;
+  /**
+   * An extension page that lets its own content be edited (the PDF viewer):
+   * why a node may not be edited, or null. Also keeps live edits (every
+   * copy, follow, attribute mirroring) out of the page's own chrome.
+   */
+  editBlocked?: (n: Node) => string | null;
 }
 
 /** Handle returned to an extension page that boots the engine itself. */
@@ -132,6 +138,13 @@ export interface BootApi {
   removeAll(): { ok: boolean; removed: number };
   readonly stickerCount: number;
   readonly locked: boolean;
+  /** Turn on the Edit text tool (needs `editBlocked` in the boot options; refused while locked). */
+  startEditText(): void;
+  /** Every node showing a live edit, with the text it shows (also while a sticker masks it). */
+  editedText(): { node: Text; text: string }[];
+  /** Drop all live edits without writing anything back: the page is replacing that content. */
+  dropEdits(): void;
+  readonly editCount: number;
 }
 
 /** Message types an extension page answers. Anything else (popup traffic to the background) is left alone. */
@@ -237,7 +250,8 @@ export async function boot(opts: BootOptions = {}): Promise<BootApi | undefined>
   const masker = new Masker(hub);
   // Live text edits listen before the Masker: a re-render that puts edited
   // text back is rewritten first, and a sticker over an edit keeps the edit.
-  const edits = new TextEdits(hub, (n) => isOurs(n) || masker.isMaskedNode(n));
+  // In the PDF viewer the attributes around text-layer spans are pdf.js's own (data-main-rotation…): no mirroring there.
+  const edits = new TextEdits(hub, (n) => isOurs(n) || masker.isMaskedNode(n) || !!opts.editBlocked?.(n), !opts.editBlocked);
   edits.start();
   masker.textView = (t, d) => edits.view(t, d);
   // Fingerprints, mask signatures and viewer identity hash the page's own text, never an edit.
@@ -387,7 +401,7 @@ export async function boot(opts: BootOptions = {}): Promise<BootApi | undefined>
   // ---- auto-suggest scanner ----
   // Registered before the first sticker load so its mutation listener is in
   // place for the rest of the parse: while locked it masks as content arrives.
-  const toolbar = new Toolbar(host, { onAction: (a) => onToolbar(a), textEdit: !extensionPage });
+  const toolbar = new Toolbar(host, { onAction: (a) => onToolbar(a), textEdit: !extensionPage || !!opts.editBlocked });
   suggestView = new SuggestView(host, {
     onCover: (id) => void scanner?.cover(id).then(() => positioner.flush()),
     onDismiss: (id) => scanner?.dismiss(id),
@@ -533,6 +547,8 @@ export async function boot(opts: BootOptions = {}): Promise<BootApi | undefined>
   edits.onChange = (n) => {
     toolbar.setEdits(n);
     textTool?.refresh();
+    // Pages that draw text themselves (the PDF viewer's canvas) repaint in the same task.
+    notifyLayout();
   };
   store.onSaveStatus = (error) => {
     sendState({ saveError: error });
@@ -632,6 +648,8 @@ export async function boot(opts: BootOptions = {}): Promise<BootApi | undefined>
 
   /** Why a text node cannot be edited, or null. Shown in the tool's hover tag. */
   function editBlocked(t: Text): string | null {
+    const page = opts.editBlocked?.(t);
+    if (page) return page;
     if (masker.isMaskedNode(t)) return 'Covered by a sticker';
     const el = t.parentElement;
     if (document.designMode === 'on' || el?.closest('input, textarea, select, option') || (el as HTMLElement | null)?.isContentEditable)
@@ -672,7 +690,7 @@ export async function boot(opts: BootOptions = {}): Promise<BootApi | undefined>
       refuse('START_EDIT_TEXT');
       return;
     }
-    if (extensionPage || rendering === 'canvas') {
+    if ((extensionPage && !opts.editBlocked) || rendering === 'canvas') {
       toolbar.toast('Edit text works on web page text, not here.');
       return;
     }
@@ -691,6 +709,7 @@ export async function boot(opts: BootOptions = {}): Promise<BootApi | undefined>
       marks: () => edits.nodes(),
       lost: () => toolbar.toast('The page changed this text. Click it again.'),
       onDone: () => stopTools(),
+      everyLabel: opts.editBlocked ? 'Every copy in this document' : undefined,
     });
     textTool.start();
   }
@@ -1377,6 +1396,12 @@ export async function boot(opts: BootOptions = {}): Promise<BootApi | undefined>
     },
     get locked() {
       return lock.locked;
+    },
+    startEditText: () => startEditText(),
+    editedText: () => edits.nodes().map((node) => ({ node, text: edits.shownText(node) ?? node.data })),
+    dropEdits: () => edits.forget(),
+    get editCount() {
+      return edits.count;
     },
   };
 }

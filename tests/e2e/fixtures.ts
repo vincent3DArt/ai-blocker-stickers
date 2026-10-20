@@ -127,6 +127,17 @@ export const test = base.extend<{ ext: Ext; page: Page }>({
 export const expect = test.expect;
 
 /** Viewport rect of an element via the page's own layout. */
+/** Start a manual AI session (from an extension page, like the popup) and wait until `page` is locked. */
+export async function lockTab(ext: Ext, page: Page) {
+  const id = new URL(ext.worker.url()).host;
+  const ctl = await ext.context.newPage();
+  await ctl.goto(`chrome-extension://${id}/popup.html`);
+  // Every extension page hears runtime messages, an open PDF viewer included (dev builds answer TEST_* there),
+  // so the reply may not be the background's: wait for the lock itself.
+  await ctl.evaluate(() => chrome.runtime.sendMessage({ type: 'TEST_SESSION', active: true }).catch(() => null));
+  await expect.poll(async () => (await ext.state(page)).lock?.locked, { timeout: 3000 }).toBe(true);
+}
+
 export async function boxOf(page: Page, selector: string) {
   return page.evaluate((sel) => {
     const el = document.querySelector(sel)!;

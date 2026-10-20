@@ -416,7 +416,8 @@ demos and for swapping a name before an agent looks, not a sticker.
     other isolated-world state.
 46. **Not editable:** text a sticker covers, text inside form fields or
     `contenteditable` editors (type in them directly), canvas-drawn pages,
-    the PDF viewer, and text in iframes (the toolbar acts on the top frame).
+    and text in iframes (the toolbar acts on the top frame). In the PDF viewer,
+    see 49-52.
     One edit changes one text node, so `Hello <b>Zelda</b> Quarry` takes a
     click per part.
 47. **Keys typed into the editor and early page listeners.** Keys, focus
@@ -427,3 +428,28 @@ demos and for swapping a name before an agent looks, not a sticker.
 48. **Reverting text under a sticker.** Revert does not rewrite text a
     sticker currently covers; when that sticker is later deleted, the edited
     text comes back, not the page's original.
+49. **PDF edits look patched on.** The new words use pdf.js's stand-in font
+    family (serif, sans-serif or monospace), not the PDF's own font, and bold
+    or italic is not matched. The cover is one flat colour sampled around the
+    text, so it shows over images, gradients or watermarks. Longer text is
+    squeezed into the original width; right-to-left text is drawn
+    left-aligned, and in CJK documents the new words can sit slightly off the
+    original baseline.
+50. **What a PDF edit can reach.** One edit changes one text-layer span (pdf.js
+    often splits a line into several). Rotated text, rotated pages and spans
+    pdf.js did not size (single characters) cannot be edited; cover them with
+    a sticker instead, and "Every copy in this document" skips them without
+    saying so. The cover is the span's box with a little padding, cut short
+    where neighbouring text is closer (tight line spacing): glyph parts beyond
+    it (large accents, swashes, unusual character spacing) can still show at
+    its edges, on screen and in the download. The file name
+    in the viewer's title is never edited.
+51. **PDF edits need the flattened download.** Only the flattened download
+    contains them, drawn into the page images. Vector mode is refused while
+    any edit exists, because the original words would stay in the file under
+    the new ones.
+52. **PDF edits are gone when the viewer closes.** Reopening the file, or
+    opening another one, shows the original text. The source file on the
+    server or the disk, and the viewer's memory while it is open, still hold
+    the original (see 22). A script running in the viewer page can move a
+    span so its cover no longer lines up with the glyphs.
