@@ -316,7 +316,7 @@ function settingsSection(settings: Settings, locked: boolean, origin: string | n
       await saveSettings({ ...cur, scanSensitivity: v });
     }),
   );
-  return disclosure('settings', 'settings', 'Settings', box, scan, detectorsFieldset(settings, origin, site, invalid, locked), pdfSettingsFieldset());
+  return disclosure('settings', 'settings', 'Settings', box, scan, detectorsFieldset(settings, origin, site, invalid, locked), pdfSettingsFieldset(settings, locked));
 }
 
 const CANVAS_NOTE =
@@ -1047,7 +1047,7 @@ function pdfOpenSection(tab: chrome.tabs.Tab | undefined): HTMLElement {
   return box;
 }
 
-function pdfSettingsFieldset(): HTMLElement {
+function pdfSettingsFieldset(settings: Settings, locked = false): HTMLElement {
   const box = h('fieldset', {});
   const check = h('input', {
     type: 'checkbox',
@@ -1080,6 +1080,25 @@ function pdfSettingsFieldset(): HTMLElement {
       'span',
       { class: 'explain' },
       'Links ending in .pdf open in the extension\'s viewer instead of Chrome\'s. Needs access to all sites. Local files also need "Allow access to file URLs" in chrome://extensions.',
+    ),
+    toggle(
+      h('input', {
+        id: 'remember-pdf-stickers',
+        checked: settings.rememberPdfStickers,
+        // Turning it off would let stickers lapse on a reload mid-session.
+        disabled: locked,
+        title: locked ? 'Locked: change this after the AI session ends' : '',
+        onchange: async (e: Event) => {
+          const cur = await loadSettings();
+          await saveSettings({ ...cur, rememberPdfStickers: (e.target as HTMLInputElement).checked });
+        },
+      }),
+      'Remember stickers on PDFs',
+    ),
+    h(
+      'span',
+      { class: 'explain' },
+      'On: stickers come back when you open the same file again. Off: stickers you place in the viewer last until you close or reload it. Stickers already saved stay until you remove them.',
     ),
   );
   return box;

@@ -132,6 +132,45 @@ test.describe('PDF viewer', () => {
     expect(await page.locator('.textLayer').first().innerText()).not.toContain(SSN);
   });
 
+  test('"Remember stickers on PDFs" off: viewer stickers last until the viewer closes, and nothing is saved', async ({ page, ext }) => {
+    const id = new URL(ext.worker.url()).host;
+    // The switch in the popup's Settings, on by default.
+    const popup = await ext.context.newPage();
+    await popup.goto(`chrome-extension://${id}/popup.html`);
+    await expect(popup.locator('#remember-pdf-stickers')).toBeChecked();
+    await popup.evaluate(() => document.getElementById('remember-pdf-stickers')!.click());
+    await expect
+      .poll(() => ext.worker.evaluate(async () => ((await chrome.storage.local.get('settings')).settings as { rememberPdfStickers?: boolean } | undefined)?.rememberPdfStickers))
+      .toBe(false);
+    await popup.close();
+
+    await openViewer(page, ext, 'sample.pdf');
+    await ext.cover(page, await ssnSelector(page));
+    expect(await page.evaluate(() => document.body.innerText)).not.toContain(SSN);
+    const st = await ext.state(page);
+    expect(st.stickers).toHaveLength(1);
+    // Not an AI-session auto-cover: nothing to keep or drop when a session ends.
+    expect(st.scan?.autoCount ?? 0).toBe(0);
+    await page.waitForTimeout(300);
+    const stored = await ext.worker.evaluate(async (key) => JSON.stringify((await chrome.storage.local.get(key))[key] ?? null), `site:chrome-extension://${id}`);
+    expect(stored).not.toContain('/pdf/');
+
+    // Reopened: the sticker is gone and the SSN is back in the text layer.
+    await page.reload();
+    await waitReady(page);
+    expect((await ext.state(page)).stickers).toHaveLength(0);
+    await expect(page.locator('#page-1 .textLayer')).toContainText(SSN);
+
+    // During an AI session the switch cannot be changed (stickers must not start lapsing mid-session).
+    const ctl = await ext.context.newPage();
+    await ctl.goto(`chrome-extension://${id}/popup.html`);
+    // The open viewer also hears runtime messages and may answer first: wait for the lock, not the reply.
+    await ctl.evaluate(() => chrome.runtime.sendMessage({ type: 'TEST_SESSION', active: true }).catch(() => null));
+    await expect.poll(async () => (await ext.state(page)).lock?.locked, { timeout: 3000 }).toBe(true);
+    await ctl.reload();
+    await expect(ctl.locator('#remember-pdf-stickers')).toBeDisabled();
+  });
+
   test('vector mode keeps the text: labelled as not a redaction', async ({ page, ext }) => {
     await openViewer(page, ext, 'sample.pdf');
     await ext.cover(page, await ssnSelector(page));

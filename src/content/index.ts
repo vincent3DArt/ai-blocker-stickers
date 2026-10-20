@@ -200,6 +200,13 @@ export async function boot(opts: BootOptions = {}): Promise<BootApi | undefined>
   // Dev only: fail the way a broken build would, before anything is mounted (cloak failsafe test).
   if (import.meta.env.DEV && devLocal.aibsFailBoot === true) throw new Error('simulated boot failure (dev)');
   let settings: Settings = settingsLoaded;
+  // The PDF viewer (the only extension page running the engine) follows "Remember stickers on PDFs".
+  // Never turned off while locked (stickers would stop surviving a reload mid-session): applied when the lock ends.
+  const syncRemember = (locked: boolean) => {
+    const want = !extensionPage || settings.rememberPdfStickers;
+    if (want || !locked) store.remember = want;
+  };
+  syncRemember(false);
   // The host is mounted before the key import so the boot cloak can come off
   // the moment storage says nothing here needs covering.
   const host = mountHost();
@@ -896,6 +903,7 @@ export async function boot(opts: BootOptions = {}): Promise<BootApi | undefined>
       toolbar.hide();
     }
     session.setLocked(lock.locked);
+    syncRemember(lock.locked);
     updateStrict();
     // Locked: no suggestion is ever drawn, detections are covered instead.
     if (lock.locked) suggestView?.clear();
@@ -1207,6 +1215,7 @@ export async function boot(opts: BootOptions = {}): Promise<BootApi | undefined>
     if (area === 'local' && changes.settings?.newValue) {
       const prev = settings;
       settings = normalizeSettings(changes.settings.newValue as Partial<Settings>);
+      syncRemember(lock.locked);
       host.setColor(settings.appearance.color);
       updateStrict();
       sendState({ strictInputs: masker.strictCount() });

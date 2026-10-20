@@ -274,7 +274,11 @@ signatures), suggestions and the locked-session auto-cover work on the text laye
 AI-session lock behave as on any site. **Remove stickers** clears the document's stickers (refused
 while locked). Stickers belong to one document: they are keyed by the first
 16 hex digits of the file's SHA-256, so they come back when you open the same file again, from any
-URL or from disk, and never appear on a different file.
+URL or from disk, and never appear on a different file. To stop that, turn off
+**Settings → PDFs → Remember stickers on PDFs**: stickers you place in the viewer then last until
+you close or reload it, like text edits, so leave it on if an agent may reload the tab. Stickers
+already saved stay until you remove them, and turning the setting back on saves the ones placed
+meanwhile. It cannot be turned off during an AI session.
 
 **Download redacted PDF.** The toolbar button builds a new file, named `<original>-redacted.pdf`.
 By default every page is re-rendered at twice its size, the stickers are painted into the pixels as
@@ -290,8 +294,9 @@ selected, copied and extracted. It is off by default and refused while the tab i
 
 **What the viewer stores and sends.** It downloads the PDF you opened and nothing else: pdf.js's
 worker, CMaps, standard fonts and image decoders are packaged with the extension, and none of them
-is fetched from a CDN. Storage gets the document key and the stickers' geometry. The file name,
-the URL and the document's text are never stored.
+is fetched from a CDN. Storage gets the document key and the stickers' geometry (nothing new
+while **Remember stickers on PDFs** is off). The file name, the URL and the document's text are
+never stored.
 
 ## What the AI sees
 

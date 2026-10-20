@@ -11,6 +11,30 @@ import { frameApplies, scopeApplies, type PathHmacs } from '@/shared/url-match';
 export class SiteStore {
   private record: SiteRecord;
   private ephemeral = new Map<string, Sticker>();
+  /**
+   * Stickers the user placed while `remember` was off: memory only, until the
+   * page closes. Unlike `ephemeral` (the AI session's auto-covers) they are
+   * never counted, kept or dropped at the end of a session.
+   */
+  private temporary = new Map<string, Sticker>();
+  private remembering = true;
+
+  /**
+   * False: new stickers stay in `temporary` instead of storage (the PDF viewer,
+   * by setting). Turned back on, the stickers placed meanwhile are saved too.
+   */
+  get remember(): boolean {
+    return this.remembering;
+  }
+
+  set remember(on: boolean) {
+    if (on === this.remembering) return;
+    this.remembering = on;
+    if (!on || !this.temporary.size) return;
+    this.record.stickers.push(...this.temporary.values());
+    this.temporary.clear();
+    this.scheduleSave();
+  }
   /** `updatedAt` of every write this store made that storage has not echoed back yet. */
   private ownWrites = new Set<number>();
   private saveTimer = 0;
@@ -70,26 +94,37 @@ export class SiteStore {
    */
   active(pathname: string, frameDepth: number, hmacs: PathHmacs = {}): Sticker[] {
     const applies = (s: Sticker) => frameApplies(s.frame, frameDepth, hmacs) && scopeApplies(s.scope, pathname, hmacs);
-    return [...this.record.stickers.filter(applies), ...Array.from(this.ephemeral.values()).filter(applies)];
+    return [
+      ...this.record.stickers.filter(applies),
+      ...Array.from(this.ephemeral.values()).filter(applies),
+      ...Array.from(this.temporary.values()).filter(applies),
+    ];
   }
 
   get(id: string): Sticker | undefined {
-    return this.ephemeral.get(id) ?? this.record.stickers.find((s) => s.id === id);
+    return this.ephemeral.get(id) ?? this.temporary.get(id) ?? this.record.stickers.find((s) => s.id === id);
   }
 
   upsert(sticker: Sticker) {
-    if (this.ephemeral.has(sticker.id)) {
-      this.ephemeral.set(sticker.id, sticker);
+    for (const memory of [this.ephemeral, this.temporary]) {
+      if (!memory.has(sticker.id)) continue;
+      memory.set(sticker.id, sticker);
       return;
     }
     const i = this.record.stickers.findIndex((s) => s.id === sticker.id);
     if (i >= 0) this.record.stickers[i] = sticker;
+    else if (!this.remember) return void this.temporary.set(sticker.id, sticker);
     else this.record.stickers.push(sticker);
     this.scheduleSave();
   }
 
+  /** Held in memory because stickers were not being remembered when it was placed. */
+  isTemporary(id: string): boolean {
+    return this.temporary.has(id);
+  }
+
   remove(id: string) {
-    if (this.ephemeral.delete(id)) return;
+    if (this.ephemeral.delete(id) || this.temporary.delete(id)) return;
     this.record.stickers = this.record.stickers.filter((s) => s.id !== id);
     this.scheduleSave();
   }
@@ -118,10 +153,13 @@ export class SiteStore {
     if (!ids.length) return ids;
     // Backstop covers belong to a lost sticker and stay session-only.
     for (const id of ids) {
-      this.record.stickers.push(this.ephemeral.get(id)!);
+      const s = this.ephemeral.get(id)!;
       this.ephemeral.delete(id);
+      // Not remembering (the PDF viewer, by setting): kept until the page closes, never saved.
+      if (this.remembering) this.record.stickers.push(s);
+      else this.temporary.set(id, s);
     }
-    this.scheduleSave();
+    if (this.remembering) this.scheduleSave();
     return ids;
   }
 
