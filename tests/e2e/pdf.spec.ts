@@ -5,6 +5,7 @@
  */
 import type { Page } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
 import { test, expect, boxOf, coverage, lockTab, ORIGIN, type Ext } from './fixtures';
 
 const SSN = '123-45-6789';
@@ -85,7 +86,8 @@ async function waitPainted(page: Page, pageNo: number) {
 /** sample.pdf page 1: "SSN 123-45-6789" in 14pt Helvetica at x=72pt, baseline 172pt from the top; the digits end near x=179pt. */
 const OLD_DIGITS = { x: 152, y: 162, w: 28, h: 12 };
 const NEW_WORDS = { x: 72, y: 162, w: 40, h: 12 };
-const fixture = (name: string) => decodeURIComponent(new URL(`../../fixtures/${name}`, import.meta.url).pathname);
+// fileURLToPath, not URL.pathname: on Windows the pathname is /D:/..., which is not a path.
+const fixture = (name: string) => fileURLToPath(new URL(`../../fixtures/${name}`, import.meta.url));
 
 test.describe('PDF viewer', () => {
   test('cover text and a region, download a flattened redacted PDF, stickers follow the document', async ({ page, ext }, info) => {
