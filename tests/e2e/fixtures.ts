@@ -76,9 +76,10 @@ export const test = base.extend<{ ext: Ext; page: Page }>({
     });
     let [worker] = context.serviceWorkers();
     if (!worker) worker = await context.waitForEvent('serviceworker');
-    // Give onInstalled a moment to register the fixture origin.
+    // Give onInstalled a moment to register the fixture origin: up to 15 s, since a
+    // loaded CI runner (windows-latest) can take more than the 5 s this used to allow.
     await worker.evaluate(async () => {
-      for (let i = 0; i < 50; i++) {
+      for (let i = 0; i < 150; i++) {
         const scripts = await chrome.scripting.getRegisteredContentScripts();
         if (scripts.length > 0) return;
         await new Promise((r) => setTimeout(r, 100));
