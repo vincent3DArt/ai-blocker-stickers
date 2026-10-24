@@ -391,3 +391,54 @@ exercise them.
     stylesheet lifts itself 1.5 seconds after the first rendered frame,
     which a hidden page can be late to produce (about 2.4 s in headless
     Edge on a busy machine).
+
+## Edited text
+
+**Edit text** rewrites what the page shows. It is a presentation layer for
+demos and for swapping a name before an agent looks, not a sticker.
+
+40. **A reload, the network and page state keep the original.** Edits are
+    held in content-script memory only and are gone on reload; the server's
+    HTML, any `fetch` response, the page's own JavaScript state (a React
+    store, a cached JSON) and `history` still carry the original text. An
+    agent that reloads the tab sees it.
+41. **Copies you did not edit.** Without **Every copy on this page**, other
+    places showing the same text keep it (a toast counts them), and so does
+    text the page renders later, unless it is the edited text itself
+    re-rendered (the same words, whitespace aside). With **Every copy**, any
+    text the page renders later that contains the edited words is edited too.
+    Inside the edited text, every occurrence of the changed words changes.
+    While locked, new text that replaces edited text in the same update and
+    repeats any of its words (3 letters or more) keeps the edit, so "Ms.
+    Zelda Q." cannot show through; a re-render that keeps none of its words
+    ("Loading…") is shown.
+42. **While locked, an edited node keeps the edit even when the page moves
+    on.** A list that recycles an edited row for another record shows the
+    edit in that row until the session ends. Privacy wins over freshness;
+    unlocked, the page's new text replaces the edit.
+43. **Reads in the same task.** A script that writes the original back and
+    reads it in the same synchronous run sees it before the mutation
+    callback rewrites it (as for stickers, see 4). The callback runs before
+    the next paint and before any later task.
+44. **Guess confirmation.** A page script can write a guessed string into
+    the page and watch whether it is rewritten, which confirms the guess.
+45. **Attributes are mirrored on the text's element and four ancestors.**
+    `title`, `aria-label`, `alt` and other attributes that repeat the text
+    there get the edit; one that holds its words in another order is blanked.
+    Link and form targets (`href`, `action`) are never rewritten, `<meta>`
+    tags, JSON in `<script>` and input values are not touched, and the
+    originals stay in content-script memory, readable through CDP like any
+    other isolated-world state.
+46. **Not editable:** text a sticker covers, text inside form fields or
+    `contenteditable` editors (type in them directly), canvas-drawn pages,
+    the PDF viewer, and text in iframes (the toolbar acts on the top frame).
+    One edit changes one text node, so `Hello <b>Zelda</b> Quarry` takes a
+    click per part.
+47. **Keys typed into the editor and early page listeners.** Keys, focus
+    and composition events aimed at the editor are stopped at the window
+    before the page's document-level handlers run, so focus traps and
+    shortcuts do not see them. A page listener registered on `window` in the
+    capture phase before the tool was turned on still runs first.
+48. **Reverting text under a sticker.** Revert does not rewrite text a
+    sticker currently covers; when that sticker is later deleted, the edited
+    text comes back, not the page's original.

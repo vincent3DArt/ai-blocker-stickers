@@ -24,6 +24,10 @@ import { Positioner } from './overlay/positioner';
 import { Picker } from './overlay/picker';
 import { overlayDev } from './overlay/sticker-view';
 import { RectDraw } from './overlay/rect-draw';
+import { TextEditTool } from './overlay/text-edit';
+import { TextEdits } from './edit/text-edits';
+import { setPageTextSource } from './edit/page-text';
+import { collectTextNodes } from './mask/text-mask';
 import { Toolbar, type ToolbarAction } from './overlay/toolbar';
 import { Banner } from './overlay/banner';
 import { EditChrome } from './overlay/edit-chrome';
@@ -231,6 +235,13 @@ export async function boot(opts: BootOptions = {}): Promise<BootApi | undefined>
   /** Our overlay host and its shadow tree, and our in-page covers: never page content. */
   const isOurs = (n: Node | null) => host.isOurs(n) || covers.isOurs(n);
   const masker = new Masker(hub);
+  // Live text edits listen before the Masker: a re-render that puts edited
+  // text back is rewritten first, and a sticker over an edit keeps the edit.
+  const edits = new TextEdits(hub, (n) => isOurs(n) || masker.isMaskedNode(n));
+  edits.start();
+  masker.textView = (t, d) => edits.view(t, d);
+  // Fingerprints, mask signatures and viewer identity hash the page's own text, never an edit.
+  setPageTextSource({ active: () => edits.managing, text: (t) => edits.pageText(t) });
   masker.start();
 
   let tabState: TabState = { ...DEFAULT_TAB_STATE };
@@ -356,6 +367,7 @@ export async function boot(opts: BootOptions = {}): Promise<BootApi | undefined>
     computeLock({ debuggerAttached: bgLock.debugger, manualSession: bgLock.manual || localSession, webdriver: webdriver() });
   let lock: LockState = currentLock();
   session.setLocked(lock.locked);
+  edits.setLocked(lock.locked);
   tabState = { ...tabState, locked: lock.locked, lockReason: lock.reason };
 
   /**
@@ -376,7 +388,7 @@ export async function boot(opts: BootOptions = {}): Promise<BootApi | undefined>
   // ---- auto-suggest scanner ----
   // Registered before the first sticker load so its mutation listener is in
   // place for the rest of the parse: while locked it masks as content arrives.
-  const toolbar = new Toolbar(host, { onAction: (a) => onToolbar(a) });
+  const toolbar = new Toolbar(host, { onAction: (a) => onToolbar(a), textEdit: !extensionPage });
   suggestView = new SuggestView(host, {
     onCover: (id) => void scanner?.cover(id).then(() => positioner.flush()),
     onDismiss: (id) => scanner?.dismiss(id),
@@ -517,7 +529,12 @@ export async function boot(opts: BootOptions = {}): Promise<BootApi | undefined>
   let editing = false;
   let picker: Picker | null = null;
   let rectDraw: RectDraw | null = null;
+  let textTool: TextEditTool | null = null;
   let reattachId: string | null = null;
+  edits.onChange = (n) => {
+    toolbar.setEdits(n);
+    textTool?.refresh();
+  };
   store.onSaveStatus = (error) => {
     sendState({ saveError: error });
     if (error && depth === 0) toolbar.toast('Could not save stickers on this site');
@@ -528,6 +545,10 @@ export async function boot(opts: BootOptions = {}): Promise<BootApi | undefined>
     picker = null;
     rectDraw?.end();
     rectDraw = null;
+    // An open editor is saved, except when the lock just came on: then it is dropped (saving could revert an edit while locked).
+    const tool = textTool;
+    textTool = null;
+    tool?.stop(!lock.locked);
     reattachId = null;
     toolbar.setActive(null);
   }
@@ -608,6 +629,71 @@ export async function boot(opts: BootOptions = {}): Promise<BootApi | undefined>
       onCancel: () => stopTools(),
     });
     rectDraw.begin();
+  }
+
+  /** Why a text node cannot be edited, or null. Shown in the tool's hover tag. */
+  function editBlocked(t: Text): string | null {
+    if (masker.isMaskedNode(t)) return 'Covered by a sticker';
+    const el = t.parentElement;
+    if (document.designMode === 'on' || el?.closest('input, textarea, select, option') || (el as HTMLElement | null)?.isContentEditable)
+      return 'Already editable: type in it';
+    if (t.data.length > 5000) return 'Too long: pick shorter text';
+    return null;
+  }
+
+  function commitEdit(t: Text, value: string, everywhere: boolean) {
+    // A sticker may have covered the text while the editor was open.
+    const why = editBlocked(t);
+    if (why) {
+      toolbar.toast(why);
+      return { reverted: false, copies: 0, remaining: 0 };
+    }
+    const r = edits.edit(t, value, everywhere);
+    if (r.reverted) toolbar.toast('Edit reverted.');
+    else if (r.copies) toolbar.toast(`Edited ${r.copies + 1} copies.`);
+    else if (r.remaining)
+      toolbar.toast(`Edited. ${r.remaining} more ${r.remaining === 1 ? 'copy' : 'copies'} on this page still show the old text: tick Every copy.`, 4000, 'warn');
+    else toolbar.toast('Edited. Click more text, or Esc to finish.');
+    positioner.flush();
+    return r;
+  }
+
+  function revertEdits(sendResponse?: (r?: unknown) => void): true {
+    if (lock.locked) return refuse('REVERT_EDITS', sendResponse);
+    const n = edits.count;
+    edits.revertAll();
+    if (n) toolbar.toast(n === 1 ? 'Edit reverted.' : 'All edits reverted.');
+    positioner.flush();
+    sendResponse?.({ ok: true });
+    return true;
+  }
+
+  function startEditText() {
+    if (lock.locked) {
+      refuse('START_EDIT_TEXT');
+      return;
+    }
+    if (extensionPage || rendering === 'canvas') {
+      toolbar.toast('Edit text works on web page text, not here.');
+      return;
+    }
+    stopTools();
+    if (!editing) setEditing(true);
+    toolbar.setActive('edit');
+    textTool = new TextEditTool(host, isOurs, {
+      blocked: editBlocked,
+      isEdited: (t) => edits.isEdited(t),
+      commit: (t, value, everywhere) => void commitEdit(t, value, everywhere),
+      revert: (t) => {
+        if (lock.locked) return void refuse('REVERT_EDITS');
+        edits.revertAt(t);
+        toolbar.toast('Edit reverted.');
+      },
+      marks: () => edits.nodes(),
+      lost: () => toolbar.toast('The page changed this text. Click it again.'),
+      onDone: () => stopTools(),
+    });
+    textTool.start();
   }
 
   async function coverSelection() {
@@ -793,6 +879,12 @@ export async function boot(opts: BootOptions = {}): Promise<BootApi | undefined>
       case 'selection':
         coverSelection();
         break;
+      case 'edit':
+        startEditText();
+        break;
+      case 'revertEdits':
+        revertEdits();
+        break;
       case 'teach':
         openTeach();
         break;
@@ -835,7 +927,7 @@ export async function boot(opts: BootOptions = {}): Promise<BootApi | undefined>
     'mousemove',
     (e) => {
       if (!e.isTrusted) return;
-      if (!editing || lock.locked || picker || rectDraw) {
+      if (!editing || lock.locked || picker || rectDraw || textTool) {
         if (editChrome.visible) editChrome.hide();
         return;
       }
@@ -896,6 +988,7 @@ export async function boot(opts: BootOptions = {}): Promise<BootApi | undefined>
       toolbar.hide();
     }
     session.setLocked(lock.locked);
+    edits.setLocked(lock.locked);
     updateStrict();
     // Locked: no suggestion is ever drawn, detections are covered instead.
     if (lock.locked) suggestView?.clear();
@@ -973,6 +1066,20 @@ export async function boot(opts: BootOptions = {}): Promise<BootApi | undefined>
           });
           return true;
         }
+        case 'TEST_EDIT': {
+          if (lock.locked) return refuse('TEST_EDIT', sendResponse);
+          const el = document.querySelector(m.selector);
+          const t = el ? collectTextNodes(el)[m.index ?? 0] : undefined;
+          const why = t ? editBlocked(t) : 'no text';
+          if (!t || why) {
+            sendResponse({ ok: false, error: why });
+            return true;
+          }
+          sendResponse({ ok: true, ...commitEdit(t, m.value, !!m.everywhere) });
+          return true;
+        }
+        case 'TEST_REVERT_EDITS':
+          return revertEdits(sendResponse);
         case 'TEST_STATE': {
           positioner.flush();
           const pieces = Array.from(host.layer.querySelectorAll<HTMLElement>('.piece')).map((p) => {
@@ -998,6 +1105,7 @@ export async function boot(opts: BootOptions = {}): Promise<BootApi | undefined>
             strict: { on: masker.isStrict, count: masker.strictCount() },
             rendering,
             covers: covers.count,
+            edits: { count: edits.count, nodes: edits.nodes().length, tool: textTool ? { open: textTool.isOpen } : null },
             maskRetry: session.maskRetryActive,
             anchors: session.anchorTags(),
             scan: {
@@ -1198,6 +1306,10 @@ export async function boot(opts: BootOptions = {}): Promise<BootApi | undefined>
       case 'START_RECT':
         if (lock.locked) return refuse('START_RECT', sendResponse);
         if (depth === 0) startRect();
+        break;
+      case 'START_EDIT_TEXT':
+        if (lock.locked) return refuse('START_EDIT_TEXT', sendResponse);
+        if (depth === 0) startEditText();
         break;
     }
     return undefined;

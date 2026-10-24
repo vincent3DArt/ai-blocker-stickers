@@ -132,6 +132,19 @@ as you like; `Esc` finishes.
 **Cover selection.** Select text and press `Alt+Shift+C`. If the selection covers most of one
 element, you get an element sticker; otherwise you get a rectangle.
 
+**Edit text.** Change text on any web page without opening DevTools. Choose **Edit text** in the
+edit-mode toolbar, click the text and type; `Enter` saves and `Esc` cancels. The tool stays on for
+the next text until you press `Esc` again. Clicks on links and buttons are swallowed while it is on.
+Bold, links and other formatting around the changed words stay as they are. Attributes that repeat
+the text (`title`, `aria-label`, `alt`…) follow the edit. If the same text appears elsewhere on the
+page, a toast says how many copies are left; tick **Every copy on this page** to change them and the
+tab title too. Edits last until the page reloads: nothing is stored. **Revert edits** in the toolbar
+undoes them all, and **Revert** in the editor undoes one. When the page re-renders the text, the
+edit is put back before it paints. During an AI session the tool and both reverts are refused,
+edits stay in place, and undo cannot bring the old text back (edits never go through the page's
+editing commands). An edit changes what the page shows; it is not a sticker. See
+[docs/LIMITATIONS.md](docs/LIMITATIONS.md#edited-text) before relying on it to hide anything.
+
 **Right-click.** The context menu offers "Cover this element with a sticker".
 
 **Peek.** Hover a sticker and hold `Ctrl+Shift` to reveal it briefly. `Ctrl+Shift+Space` reveals all
@@ -355,6 +368,10 @@ only in content-script memory, in the isolated world, where page scripts cannot 
    in Chrome's viewer. Pages with more than pdf.js's text-span limit, scanned PDFs (no text layer:
    use Draw rectangle) and rotated text are covered less precisely than plain text.
 
+10. Edit text is a display change, not protection. The page's own state, the network and a reload
+   still have the original text, and a copy shown before you edited stays unless you tick **Every
+   copy**. See [docs/LIMITATIONS.md](docs/LIMITATIONS.md#edited-text).
+
 ## Testing
 
 Unit tests run under Vitest:
@@ -379,6 +396,11 @@ development build alone pre-authorises `http://127.0.0.1:4173`, so the tests nev
 prompt; production builds request every origin from the user. To run a second checkout's suite at
 the same time, set `FIXTURES_PORT` (for example `4180`) for both the development build and
 Playwright.
+
+`tests/e2e/edit-text.spec.ts` edits text with the real mouse and keyboard and checks that the page is
+never clicked, that formatting and attributes follow the edit, that re-renders and every undo route
+(including `designMode` and `execCommand('undo')`, with a native control case) never bring the
+original back while locked, and that nothing about an edit reaches storage.
 
 `tests/e2e/pdf.spec.ts` opens `fixtures/sample.pdf` in the viewer, covers the SSN in its text layer
 and a paragraph with a rectangle, downloads the redacted file and checks with pdf.js in Node that it
