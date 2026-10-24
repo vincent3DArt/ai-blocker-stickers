@@ -24,12 +24,12 @@ async function waitReady(page: Page) {
   await expect(page.locator('body')).toHaveAttribute('data-state', 'ready', { timeout: 20_000 });
 }
 
-/** CSS selector of the page-1 text-layer span holding `needle` (the SSN by default). */
-async function spanSelector(page: Page, needle = SSN): Promise<string> {
+/** CSS selector of the text-layer span holding the SSN. */
+async function ssnSelector(page: Page): Promise<string> {
   const i = await page.evaluate((needle) => {
     const kids = Array.from(document.querySelectorAll('#page-1 .textLayer > *'));
     return kids.findIndex((k) => k.textContent?.includes(needle));
-  }, needle);
+  }, SSN);
   expect(i).toBeGreaterThanOrEqual(0);
   return `#page-1 > .textLayer > :nth-child(${i + 1})`;
 }
@@ -133,7 +133,7 @@ test.describe('PDF viewer', () => {
     await expect(page.locator('#page-2 .textLayer')).toContainText('engagement letter');
 
     // Element sticker on the SSN span of the text layer.
-    await ext.cover(page, await spanSelector(page));
+    await ext.cover(page, await ssnSelector(page));
     // Rectangle sticker over page 2's paragraph (canvas + text layer).
     await page.evaluate(() => document.getElementById('page-2')!.scrollIntoView({ block: 'start' }));
     const p2 = await boxOf(page, '#page-2');
@@ -639,7 +639,7 @@ test.describe('PDF viewer', () => {
 
   test('vector mode keeps the text: labelled as not a redaction', async ({ page, ext }) => {
     await openViewer(page, ext, 'sample.pdf');
-    await ext.cover(page, await spanSelector(page));
+    await ext.cover(page, await ssnSelector(page));
     await expect(page.locator('label.vector')).toContainText('not a true redaction');
     await page.check('#vector');
     const [dl] = await Promise.all([page.waitForEvent('download'), page.click('#download')]);
@@ -658,7 +658,7 @@ test.describe('PDF viewer', () => {
 
   test('zoom: stickers stay on their text and region', async ({ page, ext }) => {
     await openViewer(page, ext, 'sample.pdf');
-    const sel = await spanSelector(page);
+    const sel = await ssnSelector(page);
     await ext.cover(page, sel);
     const p1 = await boxOf(page, '#page-1');
     const s = p1.w / 612;
@@ -745,7 +745,7 @@ test.describe('PDF viewer', () => {
     // What the viewer stores for a document: geometry and the scope key only.
     const viewer = await ext.context.newPage();
     await openViewer(viewer, ext, 'sample.pdf');
-    await ext.cover(viewer, await spanSelector(viewer));
+    await ext.cover(viewer, await ssnSelector(viewer));
     // The store writes on the next tick: wait for it rather than racing it.
     const read = () => ext.worker.evaluate(async (key) => JSON.stringify((await chrome.storage.local.get(key))[key] ?? null), `site:chrome-extension://${id}`);
     await expect.poll(read).toContain('/pdf/');
