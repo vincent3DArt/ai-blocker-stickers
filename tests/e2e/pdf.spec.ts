@@ -689,6 +689,40 @@ test.describe('PDF viewer', () => {
       .toContain('ssn');
   });
 
+  test('a kept session auto-cover comes back after a reload once the sticker next to it is gone', async ({ page, ext }) => {
+    test.setTimeout(60_000);
+    await ext.worker.evaluate(() => chrome.storage.local.remove('aibsNoScan'));
+    await openViewer(page, ext, 'sample.pdf');
+    // A manual sticker on the line above the SSN: its text is masked while
+    // the session auto-covers the SSN.
+    const name = await ext.cover(page, await spanSelector(page, 'Jordan'));
+    const ctl = await ext.context.newPage();
+    await ctl.goto(`chrome-extension://${new URL(ext.worker.url()).host}/popup.html`);
+    // The viewer is an extension page too and answers TEST_* first, so the
+    // background's reply is lost: wait for the lock instead.
+    const session = async (active: boolean) => {
+      await ctl.evaluate((a) => chrome.runtime.sendMessage({ type: 'TEST_SESSION', active: a, keepAuto: true }), active);
+      await expect.poll(async () => (await ext.state(page)).lock?.locked, { timeout: 5000 }).toBe(active);
+    };
+    await session(true);
+    await expect.poll(async () => (await ext.state(page)).scan?.autoCount ?? 0, { timeout: 10_000 }).toBeGreaterThanOrEqual(1);
+    await session(false);
+    const key = `site:chrome-extension://${new URL(ext.worker.url()).host}`;
+    const stored = () =>
+      ext.worker.evaluate(async (k) => ((await chrome.storage.local.get(k))[k] as { stickers: { id: string; source: string }[] } | undefined)?.stickers ?? [], key);
+    await expect.poll(async () => (await stored()).filter((s) => s.source === 'session-auto').length, { timeout: 5000 }).toBe(1);
+    // The covered name never reaches storage as the auto-cover's label.
+    expect(JSON.stringify(await stored()).toLowerCase()).not.toContain('jordan');
+    await ctl.close();
+
+    await ext.send(page, { type: 'DELETE_STICKER', id: name });
+    await expect.poll(async () => (await stored()).map((s) => s.source)).toEqual(['session-auto']);
+    await page.reload();
+    await waitReady(page);
+    await expect.poll(async () => (await ext.state(page)).stickers.map((s) => s.status), { timeout: 5000 }).toEqual(['resolved']);
+    expect(await page.evaluate(() => document.body.innerText)).not.toContain(SSN);
+  });
+
   test('popup offers the viewer on a PDF tab; no PDF stickers leak into storage', async ({ page, ext }) => {
     // Headless browsers download a PDF instead of showing it, so the popup
     // is shown a real tab that claims the PDF's URL.
