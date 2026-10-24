@@ -130,9 +130,10 @@ test.describe('boot gap (MAIN-world innerText polled every 10 ms)', () => {
 /**
  * Boot cloak (public/cloak.css): the page is `visibility:hidden` from
  * document start until the content script has placed what applies here. A
- * MAIN-world probe samples the root's computed visibility at document start
- * (as soon as the root element exists) and then every 5 ms; `hiddenFor` is the
- * time from the first sample to the first visible one.
+ * MAIN-world probe samples the root's computed visibility as soon as the
+ * parser puts content under the root (from a MutationObserver, in the
+ * parser's own task), on every later DOM change, and every 5 ms; `hiddenFor`
+ * is the time from the first sample to the first visible one.
  */
 interface Cloak {
   first: string;
@@ -146,8 +147,9 @@ async function installCloakProbe(page: Page) {
     const c = { first: '', start: -1, visibleAt: -1, samples: 0 };
     (window as unknown as { __cloak: typeof c }).__cloak = c;
     const sample = () => {
-      // An init script can run before the root element exists.
-      if (!document.documentElement) return;
+      // Not before the root has content: the browser injects cloak.css just
+      // after creating the bare root, and an empty root has nothing to show.
+      if (!document.documentElement?.firstElementChild) return;
       const v = getComputedStyle(document.documentElement).visibility;
       if (!c.samples++) {
         c.first = v;
@@ -156,8 +158,14 @@ async function installCloakProbe(page: Page) {
       if (c.visibleAt < 0 && v === 'visible') {
         c.visibleAt = performance.now();
         clearInterval(t);
+        mo.disconnect();
       }
     };
+    // A timer's first tick can land after a failed boot's failsafe (one
+    // storage round trip in) has already lifted the cloak; the observer
+    // samples while the parser is still inserting the page.
+    const mo = new MutationObserver(sample);
+    mo.observe(document, { childList: true, subtree: true });
     const t = setInterval(sample, 5);
     sample();
   });
