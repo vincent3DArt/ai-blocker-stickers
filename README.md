@@ -289,6 +289,18 @@ while locked). Stickers belong to one document: they are keyed by the first
 16 hex digits of the file's SHA-256, so they come back when you open the same file again, from any
 URL or from disk, and never appear on a different file.
 
+**Edit text in the viewer.** **Edit text** in the viewer's toolbar works as on web pages: click a
+line, type, `Enter` saves, `Esc` cancels, and the tool stays on until `Esc` again. The original
+words are painted over in the page itself, with the background colour around them, and the new
+words are drawn in their place in the document's own font, size and colour, on the same baseline,
+squeezed into the original width when longer.
+The text layer that page readers see holds the new words. Undo one edit with **Revert** in the
+editor, or all of them with **Revert edits** in the edit toolbar. Edits last until you close the
+viewer or open another file; nothing is stored. To keep them, use **Download redacted PDF**: the
+flattened download draws the edits into the page images, so the original words are gone from the
+file. Vector mode is refused while edits exist, because it would keep the original words under
+them. During an AI session the tool and both reverts are refused and edits stay in place.
+
 **Download redacted PDF.** The toolbar button builds a new file, named `<original>-redacted.pdf`.
 By default every page is re-rendered at twice its size, the stickers are painted into the pixels as
 solid black, and the image becomes the whole page. That is a real redaction: the new file has no

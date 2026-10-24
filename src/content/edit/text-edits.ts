@@ -107,6 +107,11 @@ export class TextEdits {
     private hub: MutationHub,
     /** Our own overlay nodes and anything a sticker masks: the Masker owns those. */
     private skip: (n: Node) => boolean,
+    /**
+     * Mirror edits into attributes that repeat the text (title, aria-label…). Off where the
+     * attributes around the text belong to the page's own machinery (pdf.js's text layer).
+     */
+    private mirrorAttrs = true,
   ) {}
 
   start() {
@@ -134,6 +139,26 @@ export class TextEdits {
 
   isEdited(t: Text): boolean {
     return this.edits.some((e) => e.nodes.has(t));
+  }
+
+  /** What an edited node shows (the edit, also while a sticker's bullets replace it in the DOM), else undefined. */
+  shownText(t: Text): string | undefined {
+    return this.page.has(t) ? this.shown.get(t) : undefined;
+  }
+
+  /**
+   * Drop every edit without writing anything back: the content they were on
+   * is being thrown away (the PDF viewer opening another document). Allowed
+   * while locked, since it reveals nothing. Must run before the old content's
+   * removal records arrive, or the locked freeze and the follow rule could
+   * latch onto the new content.
+   */
+  forget() {
+    this.edits = [];
+    this.page.clear();
+    this.attrPage.clear();
+    this.shown = new WeakMap();
+    this.changed();
   }
 
   /** Connected nodes showing an edit, for the outline marks. */
@@ -255,7 +280,7 @@ export class TextEdits {
     this.page.set(t, page);
     this.watch(t);
     this.write(t, this.render(t));
-    this.mirror(e, t);
+    if (this.mirrorAttrs) this.mirror(e, t);
   }
 
   /** Text that changing would alter a form's value, not just what the page shows. */
@@ -419,7 +444,7 @@ export class TextEdits {
   }
 
   private onAttr(el: Element, attr: string) {
-    if (!el.isConnected || this.skip(el)) return;
+    if (!this.mirrorAttrs || !el.isConnected || this.skip(el)) return;
     const current = el.getAttribute(attr);
     if (this.attrShown.get(el)?.get(attr) === current) return; // ours
     const backup = this.attrPage.get(el);
