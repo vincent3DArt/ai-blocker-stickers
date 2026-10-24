@@ -3,9 +3,9 @@ import * as pdfjs from 'pdfjs-dist';
 import type { PDFDocumentProxy, PDFPageProxy, PageViewport } from 'pdfjs-dist';
 import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import { boot, type BootApi } from '@/content/index';
-import { docPath, fileNameFromUrl, parseSrc, redactedFileName, sha256Hex, viewRectsToPageRects, type PageBox } from '@/pdf/geometry';
+import { docPath, editPad, fileNameFromUrl, parseSrc, redactedFileName, sha256Hex, viewRectsToPageRects, type PageBox, type PageEdit, type Rect } from '@/pdf/geometry';
 import { loadPdfBytes, SourceError } from '@/pdf/source';
-import { buildFlattened, buildVector, saveBytes } from '@/pdf/redact';
+import { buildFlattened, buildVector, paintEdits, saveBytes } from '@/pdf/redact';
 import { icon, type IconName } from '@/shared/icons';
 
 /*
@@ -28,6 +28,7 @@ const titleEl = $<HTMLElement>('title');
 const fileInput = $<HTMLInputElement>('file');
 const btnPick = $<HTMLButtonElement>('pick');
 const btnRect = $<HTMLButtonElement>('rect');
+const btnEdit = $<HTMLButtonElement>('edit');
 const btnDone = $<HTMLButtonElement>('done');
 const btnClear = $<HTMLButtonElement>('clear');
 const btnDownload = $<HTMLButtonElement>('download');
@@ -54,6 +55,8 @@ interface PageView {
   el: HTMLDivElement;
   canvas: HTMLCanvasElement;
   rendered: boolean;
+  /** Canvas px per PDF point of what the canvas shows now (0 before its first render). */
+  drawnScale: number;
 }
 
 interface Loaded {
@@ -78,7 +81,7 @@ const ZOOMS = [0.5, 0.67, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2, 2.5, 3];
 function setState(s: 'empty' | 'loading' | 'ready' | 'error') {
   document.body.dataset.state = s;
   const ready = s === 'ready';
-  btnPick.disabled = btnRect.disabled = btnDone.disabled = btnClear.disabled = btnDownload.disabled = !ready;
+  btnPick.disabled = btnRect.disabled = btnEdit.disabled = btnDone.disabled = btnClear.disabled = btnDownload.disabled = !ready;
   updateZoomUi();
   updatePageIndicator();
 }
@@ -103,13 +106,25 @@ async function pumpRender() {
       pv.rendered = true;
       const dpr = window.devicePixelRatio || 1;
       const vp = pv.page.getViewport({ scale: pv.view.scale * dpr });
-      pv.canvas.width = Math.ceil(vp.width);
-      pv.canvas.height = Math.ceil(vp.height);
+      // Rendered off screen, live edits painted in, then swapped in within one task: the original glyphs
+      // under an edit never reach the screen, not even half-drawn. On failure the old canvas stays.
+      const scratch = document.createElement('canvas');
+      scratch.width = Math.ceil(vp.width);
+      scratch.height = Math.ceil(vp.height);
+      const ctx = scratch.getContext('2d')!;
       try {
-        await pv.page.render({ canvas: pv.canvas, canvasContext: pv.canvas.getContext('2d')!, viewport: vp }).promise;
+        await pv.page.render({ canvas: scratch, canvasContext: ctx, viewport: vp }).promise;
       } catch (e) {
         console.warn('[aibs] page render failed', pv.index + 1, e);
+        continue;
       }
+      if (!pv.el.isConnected) continue;
+      paintEdits(ctx, editsOn(pv), vp.scale);
+      pv.canvas.width = scratch.width;
+      pv.canvas.height = scratch.height;
+      pv.canvas.getContext('2d')!.drawImage(scratch, 0, 0);
+      pv.drawnScale = vp.scale;
+      scratch.width = scratch.height = 0;
     }
   } finally {
     rendering = false;
@@ -135,6 +150,10 @@ async function renderTextLayer(pv: PageView): Promise<void> {
   tl.textDivs.forEach((div, i) => {
     const it = items[i];
     if (!it || !it.str) return;
+    // For live edits: the font pdf.js loaded for this text (its FontFace family) and the baseline in page points.
+    const { fontName, transform } = it as { fontName?: string; transform?: number[] };
+    if (fontName) div.dataset.font = fontName;
+    if (transform) div.dataset.baseline = pv.base.convertToViewportPoint(transform[4], transform[5])[1].toFixed(2);
     const scaleX = Number(div.style.getPropertyValue('--scale-x')) || 0;
     if (!(scaleX > 0)) return;
     const vertical = content.styles[(it as { fontName?: string }).fontName ?? '']?.vertical;
@@ -146,10 +165,14 @@ async function renderTextLayer(pv: PageView): Promise<void> {
 
 function clearPages() {
   coverKey = '';
+  editKeys = [];
   observer?.disconnect();
   observer = null;
   renderQueue.length = 0;
   pagesEl.replaceChildren();
+  // Synchronously, before show()'s first await: the old pages' removal records then find no edits,
+  // so neither the locked freeze nor the follow rule can latch onto the next document.
+  engine?.dropEdits();
 }
 
 async function show(bytes: Uint8Array, name: string) {
@@ -205,7 +228,7 @@ async function show(bytes: Uint8Array, name: string) {
     canvas.setAttribute('aria-hidden', 'true');
     el.appendChild(canvas);
     pagesEl.appendChild(el);
-    pages.push({ index: i, page, base, view, el, canvas, rendered: false });
+    pages.push({ index: i, page, base, view, el, canvas, rendered: false, drawnScale: 0 });
   }
 
   // Canvases render lazily, nearest pages first.
@@ -304,6 +327,126 @@ function syncCover() {
   }
 }
 
+// ---- live text edits painted into the pages ----
+
+/*
+ * The text layer is transparent: the canvas draws the words. A live edit
+ * changes the span's text (what page readers see); here the original glyphs
+ * under it are covered and the new words drawn, into the canvas pixels
+ * themselves, so screenshots, getImageData and printing all show the edit.
+ */
+let editKeys: string[] = [];
+
+/** Edits on one page, in PDF points, from the live edits the engine reports. */
+function editsOn(pv: PageView, all = engine?.editedText() ?? []): PageEdit[] {
+  const mine = all.filter(({ node }) => pv.el.contains(node));
+  const layer = pv.el.querySelector<HTMLElement>('.textLayer');
+  if (!mine.length || !layer) return [];
+  // Spans are laid out in the text layer's box, which pdf.js rounds to whole pixels (the page box is not).
+  const lr = layer.getBoundingClientRect();
+  if (lr.width <= 0 || lr.height <= 0) return [];
+  const toPt = (r: DOMRect): Rect => ({ x: ((r.left - lr.left) * pv.base.width) / lr.width, y: ((r.top - lr.top) * pv.base.height) / lr.height, w: (r.width * pv.base.width) / lr.width, h: (r.height * pv.base.height) / lr.height });
+  const edited = new Set(mine.map(({ node }) => node.parentElement));
+  // The page's other text: a cover stops short of it.
+  const others = Array.from(layer.querySelectorAll<HTMLElement>('span'))
+    .filter((s) => !s.firstElementChild && !edited.has(s) && /\S/.test(s.textContent ?? ''))
+    .map((s) => toPt(s.getBoundingClientRect()));
+  return mine.map(({ node, text }) => {
+    const span = node.parentElement!;
+    const b = toPt(span.getBoundingClientRect());
+    // --font-height is in PDF points; the box of a span edited to nothing has no height.
+    const h = parseFloat(span.style.getPropertyValue('--font-height')) || b.h;
+    const fallback = span.style.fontFamily || 'sans-serif';
+    const font = documentFont(pv, span.dataset.font);
+    const baseline = parseFloat(span.dataset.baseline ?? '');
+    return {
+      page: pv.index,
+      x: b.x,
+      y: b.y,
+      w: b.w,
+      h,
+      text,
+      // The document's own font when pdf.js loaded it; characters its subset lacks fall back per glyph.
+      family: font.loaded ? `"${span.dataset.font}", ${fallback}` : fallback,
+      style: font.style,
+      // pdf.js's scale fits the stand-in font to the real glyph widths; the real font needs none.
+      scaleX: font.loaded ? 1 : Number(span.style.getPropertyValue('--scale-x')) || 1,
+      baseline: Number.isFinite(baseline) ? baseline : undefined,
+      pad: editPad({ ...b, h }, h, others),
+    };
+  });
+}
+
+/**
+ * The PDF font behind a text-layer span: whether pdf.js registered it as a
+ * loaded FontFace in this page (Type3 and failed fonts are drawn by pdf.js
+ * itself and are not), and its weight and slant for the fallback glyphs.
+ */
+function documentFont(pv: PageView, id: string | undefined): { loaded: boolean; style: string } {
+  if (!id) return { loaded: false, style: '' };
+  let loaded = false;
+  for (const f of document.fonts) if (f.status === 'loaded' && f.family.replace(/^["']|["']$/g, '') === id) loaded = true;
+  const objs = pv.page.commonObjs;
+  const info = objs.has(id) ? (objs.get(id) as { bold?: boolean; black?: boolean; italic?: boolean }) : null;
+  const style = [info?.italic ? 'italic' : '', info?.bold || info?.black ? 'bold' : ''].filter(Boolean).join(' ');
+  return { loaded, style };
+}
+
+/** Repaint pages whose edits changed: at once on the canvas shown, then a clean re-render drops anything an edit no longer covers. */
+function syncEdits() {
+  const cur = current;
+  if (!cur || !engine) return;
+  const all = engine.editedText();
+  if (!all.length && !editKeys.some(Boolean)) return;
+  // Runs on every reposition (each scroll frame): only pages with edits now or before are measured.
+  const byPage = new Map<Element, typeof all>();
+  for (const e of all) {
+    const pg = e.node.parentElement?.closest('.page');
+    if (pg) byPage.set(pg, [...(byPage.get(pg) ?? []), e]);
+  }
+  let changed = false;
+  for (const pv of cur.pages) {
+    const list = byPage.get(pv.el);
+    if (!list && !editKeys[pv.index]) continue;
+    const mine = list ? editsOn(pv, list) : [];
+    const key = mine.map((e) => [e.x, e.y, e.w, e.h].map((v) => v.toFixed(1)).join(',') + '|' + e.text).join(';');
+    if (key === (editKeys[pv.index] ?? '')) continue;
+    editKeys[pv.index] = key;
+    if (pv.drawnScale > 0) paintEdits(pv.canvas.getContext('2d')!, mine, pv.drawnScale);
+    pv.rendered = false;
+    changed = true;
+  }
+  if (changed) queueNearby();
+}
+
+/** Why a node in the viewer may not be edited: only document text in a sized, unrotated text-layer span. */
+function viewerEditBlocked(n: Node): string | null {
+  const cur = current;
+  if (!cur) return 'The document is still loading';
+  const el = n.nodeType === Node.ELEMENT_NODE ? (n as Element) : n.parentElement;
+  if (!el || !pagesEl.contains(el)) return 'Only the document text can be edited';
+  if (n.nodeType !== Node.TEXT_NODE) return null;
+  const span = el.closest<HTMLElement>('.textLayer span');
+  if (!span || !span.style.width) return 'This text cannot be edited here';
+  // Rotation from the page model, never from a DOM attribute a script (or an edit) could rewrite.
+  const pv = cur.pages.find((p) => p.el.contains(span));
+  if (!pv || span.style.getPropertyValue('--rotate') || pv.view.rotation % 360) return 'Rotated text: cover it instead';
+  return null;
+}
+
+/** Queue the not-yet-rendered pages near the viewport (pages already on screen get no new IntersectionObserver entry). */
+function queueNearby() {
+  const cur = current;
+  if (!cur) return;
+  const vr = viewerEl.getBoundingClientRect();
+  for (const pv of cur.pages) {
+    if (pv.rendered) continue;
+    const r = pv.el.getBoundingClientRect();
+    if (r.bottom > vr.top - 800 && r.top < vr.bottom + 800) renderQueue.push(pv);
+  }
+  void pumpRender();
+}
+
 // ---- zoom and page indicator ----
 
 function updateZoomUi() {
@@ -339,13 +482,7 @@ function setZoom(next: number) {
     pv.rendered = false;
   }
   viewerEl.scrollTop = frac * viewerEl.scrollHeight;
-  // Pages already on screen get no new IntersectionObserver entry: queue them here.
-  const vr = viewerEl.getBoundingClientRect();
-  for (const pv of cur.pages) {
-    const r = pv.el.getBoundingClientRect();
-    if (r.bottom > vr.top - 800 && r.top < vr.bottom + 800) renderQueue.push(pv);
-  }
-  void pumpRender();
+  queueNearby();
   engine?.refresh();
   updateZoomUi();
   updatePageIndicator();
@@ -404,17 +541,23 @@ async function download() {
     return { box: { x: r.left, y: r.top, w: r.width, h: r.height }, width: p.base.width, height: p.base.height };
   });
   const pageRects = viewRectsToPageRects(rects, boxes);
+  const live = engine.editedText();
+  const edits = cur.pages.flatMap((pv) => editsOn(pv, live));
+  if (vector && edits.length) {
+    status('Edited text: vector mode would keep the original words in the file under your edits. Untick "Keep text outside stickers" to download a flattened PDF, or revert the edits.', true);
+    return;
+  }
   btnDownload.disabled = true;
   try {
     status(vector ? 'Drawing boxes…' : 'Flattening pages…');
     const out = vector
       ? await buildVector(cur.doc, cur.bytes, pageRects)
-      : await buildFlattened(cur.doc, pageRects, (d, t) => status(`Flattening page ${d} of ${t}…`));
+      : await buildFlattened(cur.doc, pageRects, edits, (d, t) => status(`Flattening page ${d} of ${t}…`));
     saveBytes(out, redactedFileName(cur.name));
     status(
       vector
         ? `Saved with ${pageRects.length} box${pageRects.length === 1 ? '' : 'es'}. Not a redaction: the text under them is still in the file.`
-        : `Saved ${cur.pages.length} flattened page${cur.pages.length === 1 ? '' : 's'} with ${pageRects.length} redaction${pageRects.length === 1 ? '' : 's'}.`,
+        : `Saved ${cur.pages.length} flattened page${cur.pages.length === 1 ? '' : 's'} with ${pageRects.length} redaction${pageRects.length === 1 ? '' : 's'}.${edits.length ? ' Edited text is drawn into the pages.' : ''}`,
     );
   } catch (e) {
     status(`Could not build the PDF: ${e instanceof Error ? e.message : String(e)}`, true);
@@ -509,6 +652,7 @@ window.addEventListener('drop', (e) => {
 
 btnPick.onclick = () => engine?.startPick();
 btnRect.onclick = () => engine?.startRect();
+btnEdit.onclick = () => engine?.startEditText();
 btnDone.onclick = () => engine?.setEditing(false);
 btnClear.onclick = () => {
   const n = engine?.stickerCount ?? 0;
@@ -528,8 +672,9 @@ async function main() {
   }
   setState('empty');
   try {
-    engine = await boot({ pagePath: () => scopePath, forceDom: true });
+    engine = await boot({ pagePath: () => scopePath, forceDom: true, editBlocked: viewerEditBlocked });
     engine?.onLayout(syncCover);
+    engine?.onLayout(syncEdits);
   } catch (e) {
     console.error('[aibs] sticker engine failed to start', e);
   }

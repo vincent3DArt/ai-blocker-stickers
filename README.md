@@ -287,7 +287,26 @@ signatures), suggestions and the locked-session auto-cover work on the text laye
 AI-session lock behave as on any site. **Remove stickers** clears the document's stickers (refused
 while locked). Stickers belong to one document: they are keyed by the first
 16 hex digits of the file's SHA-256, so they come back when you open the same file again, from any
-URL or from disk, and never appear on a different file.
+URL or from disk, and never appear on a different file. To stop that, turn off
+**Settings → PDFs → Remember stickers on PDFs**: stickers you place in the viewer then last until
+you close its tab. They are kept in that tab's session storage, so a reload (an agent's included)
+still finds them, and no other tab sees them. Turning it off deletes every saved PDF sticker, for
+all documents, after asking; they also come off any PDF open at the time. While an AI session runs
+or any viewer tab is locked (a debugger or automation attached), the deletion waits until that
+ends. Stickers placed while it was off stay in their tab until it closes, even if you turn it back
+on. It cannot be turned off during an AI session.
+
+**Edit text in the viewer.** **Edit text** in the viewer's toolbar works as on web pages: click a
+line, type, `Enter` saves, `Esc` cancels, and the tool stays on until `Esc` again. The original
+words are painted over in the page itself, with the background colour around them, and the new
+words are drawn in their place in the document's own font, size and colour, on the same baseline,
+squeezed into the original width when longer.
+The text layer that page readers see holds the new words. Undo one edit with **Revert** in the
+editor, or all of them with **Revert edits** in the edit toolbar. Edits last until you close the
+viewer or open another file; nothing is stored. To keep them, use **Download redacted PDF**: the
+flattened download draws the edits into the page images, so the original words are gone from the
+file. Vector mode is refused while edits exist, because it would keep the original words under
+them. During an AI session the tool and both reverts are refused and edits stay in place.
 
 **Download redacted PDF.** The toolbar button builds a new file, named `<original>-redacted.pdf`.
 By default every page is re-rendered at twice its size, the stickers are painted into the pixels as
@@ -303,8 +322,10 @@ selected, copied and extracted. It is off by default and refused while the tab i
 
 **What the viewer stores and sends.** It downloads the PDF you opened and nothing else: pdf.js's
 worker, CMaps, standard fonts and image decoders are packaged with the extension, and none of them
-is fetched from a CDN. Storage gets the document key and the stickers' geometry. The file name,
-the URL and the document's text are never stored.
+is fetched from a CDN. Storage gets the document key and the stickers' geometry (none while
+**Remember stickers on PDFs** is off, once any wait for a lock is over: the stickers placed then are
+kept in that tab's session storage, which Chrome drops when the tab closes). The file name, the URL
+and the document's text are never stored.
 
 ## What the AI sees
 

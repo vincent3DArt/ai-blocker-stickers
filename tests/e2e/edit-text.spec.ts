@@ -5,18 +5,9 @@
  * and nothing can revert the edits.
  */
 import type { Page } from '@playwright/test';
-import { test, expect, boxOf, type Ext } from './fixtures';
+import { test, expect, boxOf, lockTab } from './fixtures';
 
 const bullets = (s: string) => s.replace(/\S/g, '•');
-
-/** An extension page to send popup-only messages from (TEST_SESSION). */
-async function lockTab(ext: Ext, page: Page) {
-  const id = new URL(ext.worker.url()).host;
-  const ctl = await ext.context.newPage();
-  await ctl.goto(`chrome-extension://${id}/popup.html`);
-  expect(await ctl.evaluate(() => chrome.runtime.sendMessage({ type: 'TEST_SESSION', active: true }))).toMatchObject({ ok: true });
-  await expect.poll(async () => (await ext.state(page)).lock?.locked, { timeout: 3000 }).toBe(true);
-}
 
 /** Viewport rect of the first text node under `selector`. */
 const textBox = (page: Page, selector: string) =>

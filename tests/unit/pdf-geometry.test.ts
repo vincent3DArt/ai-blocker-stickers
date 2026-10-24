@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest';
 import {
   docPath,
   fileNameFromUrl,
+  editPad,
   fillRects,
+  inkColors,
   looksLikePdfUrl,
   parseSrc,
   redactedFileName,
@@ -139,5 +141,50 @@ describe('parseSrc', () => {
     expect(looksLikePdfUrl('https://example.com/x.PDF?dl=1')).toBe(true);
     expect(looksLikePdfUrl('https://example.com/pdf')).toBe(false);
     expect(looksLikePdfUrl('ftp://example.com/x.pdf')).toBe(false);
+  });
+});
+
+describe('inkColors (live PDF edits)', () => {
+  /** w × h RGBA pixels: `ring` everywhere, `ink` at the listed inner pixels. */
+  function pixels(w: number, h: number, ring: number[], inkAt: Array<[number, number, number[]]> = []): Uint8ClampedArray {
+    const px = new Uint8ClampedArray(w * h * 4);
+    for (let i = 0; i < w * h; i++) px.set([...ring, 255], i * 4);
+    for (const [x, y, c] of inkAt) px.set([...c, 255], (y * w + x) * 4);
+    return px;
+  }
+  const inner = { x: 2, y: 2, w: 6, h: 4 };
+
+  it('white page with black ink', () => {
+    const px = pixels(10, 8, [255, 255, 255], [[3, 3, [0, 0, 0]], [4, 3, [20, 20, 20]]]);
+    expect(inkColors(px, 10, 8, inner)).toEqual({ bg: 'rgb(255,255,255)', fg: 'rgb(0,0,0)' });
+  });
+
+  it('the most common ring colour wins, and blue ink is kept', () => {
+    const px = pixels(10, 8, [200, 200, 200], [[0, 0, [10, 10, 10]], [1, 0, [10, 10, 10]], [5, 4, [20, 40, 220]]]);
+    expect(inkColors(px, 10, 8, inner)).toEqual({ bg: 'rgb(200,200,200)', fg: 'rgb(20,40,220)' });
+  });
+
+  it('no ink: black on a light page, white on a dark one', () => {
+    expect(inkColors(pixels(10, 8, [240, 240, 230]), 10, 8, inner).fg).toBe('rgb(0,0,0)');
+    expect(inkColors(pixels(10, 8, [20, 30, 40]), 10, 8, inner).fg).toBe('rgb(255,255,255)');
+  });
+});
+
+describe('editPad (live PDF edit covers)', () => {
+  const line = { x: 72, y: 160, w: 100, h: 14 };
+  it('pads by a share of the font size when nothing is near', () => {
+    const p = editPad(line, 14, []);
+    for (const [k, v] of Object.entries({ t: 1.4, r: 0.7, b: 1.4, l: 0.7 })) expect(p[k as keyof typeof p]).toBeCloseTo(v);
+  });
+  it('stops short of the lines above and below in tight leading, and of the next word', () => {
+    const above = { x: 72, y: 145, w: 120, h: 14.5 }; // ends 0.5pt above the edit
+    const below = { x: 80, y: 174.3, w: 50, h: 14 }; // starts 0.3pt below
+    const next = { x: 172.2, y: 160, w: 30, h: 14 }; // same line, 0.2pt to the right
+    const far = { x: 400, y: 100, w: 30, h: 14 };
+    const p = editPad(line, 14, [above, below, next, far]);
+    expect(p.t).toBeCloseTo(0.5);
+    expect(p.b).toBeCloseTo(0.3);
+    expect(p.r).toBeCloseTo(0.2);
+    expect(p.l).toBeCloseTo(0.7);
   });
 });

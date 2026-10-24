@@ -6,7 +6,7 @@
 import type { Page } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { test, expect, boxOf, coverage, ORIGIN, type Ext } from './fixtures';
+import { test, expect, boxOf, coverage, lockTab, ORIGIN, type Ext } from './fixtures';
 
 const SSN = '123-45-6789';
 
@@ -62,6 +62,68 @@ async function canvasPixel(page: Page, pageNo: number, xPt: number, yPt: number)
     { pageNo, xPt, yPt },
   );
 }
+
+/** Darkest channel over a box of a page's canvas, the box in PDF points from the top-left (612 × 792 pages). */
+async function darkest(page: Page, pageNo: number, b: { x: number; y: number; w: number; h: number }): Promise<number> {
+  return page.evaluate(
+    ({ pageNo, b }) => {
+      const c = document.querySelector<HTMLCanvasElement>(`#page-${pageNo} canvas`)!;
+      const s = c.width / 612;
+      const d = c.getContext('2d')!.getImageData(Math.round(b.x * s), Math.round(b.y * s), Math.max(1, Math.round(b.w * s)), Math.max(1, Math.round(b.h * s))).data;
+      let min = 255;
+      for (let i = 0; i < d.length; i += 4) min = Math.min(min, d[i], d[i + 1], d[i + 2]);
+      return min;
+    },
+    { pageNo, b },
+  );
+}
+
+/** Wait until a page's canvas shows a finished render: it keeps its blank 300 × 150 default until the first one is swapped in. */
+async function waitPainted(page: Page, pageNo: number) {
+  await expect.poll(() => page.evaluate((n) => document.querySelector<HTMLCanvasElement>(`#page-${n} canvas`)!.width, pageNo), { timeout: 20_000 }).toBeGreaterThan(300);
+}
+
+/** Selector of the page-1 text-layer span containing `needle`. */
+async function spanSelector(page: Page, needle: string): Promise<string> {
+  const i = await page.evaluate((n) => Array.from(document.querySelectorAll('#page-1 .textLayer > *')).findIndex((k) => k.textContent?.includes(n)), needle);
+  expect(i).toBeGreaterThanOrEqual(0);
+  return `#page-1 > .textLayer > :nth-child(${i + 1})`;
+}
+
+/**
+ * Ink inside a box of page 1's canvas (PDF points, 612-wide pages): the share of dark pixels, the top
+ * and bottom rows that have any (in points), and the dark/light bitmap to tell whether anything changed.
+ */
+async function ink(page: Page, b: { x: number; y: number; w: number; h: number }) {
+  return page.evaluate((b) => {
+    const c = document.querySelector<HTMLCanvasElement>('#page-1 canvas')!;
+    const s = c.width / 612;
+    const [x, y, w, h] = [Math.round(b.x * s), Math.round(b.y * s), Math.round(b.w * s), Math.round(b.h * s)];
+    const d = c.getContext('2d')!.getImageData(x, y, w, h).data;
+    let dark = 0;
+    let top = -1;
+    let bottom = -1;
+    let bits = '';
+    for (let row = 0; row < h; row++) {
+      for (let col = 0; col < w; col++) {
+        const i = (row * w + col) * 4;
+        const on = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2] < 128;
+        bits += on ? '1' : '0';
+        if (!on) continue;
+        dark++;
+        if (top < 0) top = row;
+        bottom = row;
+      }
+    }
+    return { frac: dark / (w * h), top: b.y + top / s, bottom: b.y + bottom / s, bits };
+  }, b);
+}
+
+/** sample.pdf page 1: "SSN 123-45-6789" in 14pt Helvetica at x=72pt, baseline 172pt from the top; the digits end near x=179pt. */
+const OLD_DIGITS = { x: 152, y: 162, w: 28, h: 12 };
+const NEW_WORDS = { x: 72, y: 162, w: 40, h: 12 };
+// fileURLToPath, not URL.pathname: on Windows the pathname is /D:/..., which is not a path.
+const fixture = (name: string) => fileURLToPath(new URL(`../../fixtures/${name}`, import.meta.url));
 
 test.describe('PDF viewer', () => {
   test('cover text and a region, download a flattened redacted PDF, stickers follow the document', async ({ page, ext }, info) => {
@@ -120,6 +182,7 @@ test.describe('PDF viewer', () => {
     await waitReady(page);
     await expect(page.locator('#title')).toHaveText('sample-redacted.pdf');
     expect((await ext.state(page)).stickers).toHaveLength(0);
+    await waitPainted(page, 1);
     // "SSN 123-45-6789" is drawn at x=72pt, baseline 620pt from the bottom (14pt type).
     await expect
       .poll(async () => {
@@ -131,6 +194,433 @@ test.describe('PDF viewer', () => {
     const white = await canvasPixel(page, 1, 400, 400);
     expect(Math.min(...white)).toBeGreaterThan(200);
     expect(await page.locator('.textLayer').first().innerText()).not.toContain(SSN);
+  });
+
+  /** Storage key of the viewer's stickers (all documents share the extension's own site record). */
+  const viewerKey = (ext: Ext) => `site:chrome-extension://${new URL(ext.worker.url()).host}`;
+  const savedCount = (ext: Ext) =>
+    ext.worker.evaluate(async (key) => ((await chrome.storage.local.get(key))[key] as { stickers?: unknown[] } | undefined)?.stickers?.length ?? 0, viewerKey(ext));
+  /** Records the most stickers any write to the viewer's key held from now on (a wrong save is deleted at once, so the count alone hides it). */
+  const watchSaves = (ext: Ext) =>
+    ext.worker.evaluate((key) => {
+      const g = globalThis as unknown as { maxSaved: number };
+      g.maxSaved = 0;
+      chrome.storage.onChanged.addListener((c) => {
+        g.maxSaved = Math.max(g.maxSaved, (c[key]?.newValue as { stickers?: unknown[] } | undefined)?.stickers?.length ?? 0);
+      });
+    }, viewerKey(ext));
+  const maxSaved = (ext: Ext) => ext.worker.evaluate(() => (globalThis as unknown as { maxSaved: number }).maxSaved);
+  const rememberOff = (ext: Ext) =>
+    ext.worker.evaluate(async () => {
+      const cur = (await chrome.storage.local.get('settings')).settings as Record<string, unknown> | undefined;
+      await chrome.storage.local.set({ settings: { ...cur, rememberPdfStickers: false } });
+    });
+  /** CSS selector of the text-layer span holding `needle`. */
+  const layerSpan = async (page: Page, needle: string) => {
+    const i = await page.evaluate((n) => Array.from(document.querySelectorAll('#page-1 .textLayer > *')).findIndex((k) => k.textContent?.includes(n)), needle);
+    expect(i).toBeGreaterThanOrEqual(0);
+    return `#page-1 > .textLayer > :nth-child(${i + 1})`;
+  };
+  const session = (ext: Ext, active: boolean) =>
+    // Sent from an extension page; the open viewer also hears runtime messages and may answer first, so callers wait for the lock.
+    ext.context.pages().find((p) => p.url().includes('/popup.html'))!.evaluate((a) => chrome.runtime.sendMessage({ type: 'TEST_SESSION', active: a }).catch(() => null), active);
+
+  test('"Remember stickers on PDFs" off: saved stickers are deleted, new ones last until the viewer\'s tab closes', async ({ page, ext }) => {
+    const id = new URL(ext.worker.url()).host;
+    // On by default: stickers are saved for each document.
+    await openViewer(page, ext, 'sample.pdf');
+    await ext.cover(page, await ssnSelector(page));
+    const other = await ext.context.newPage();
+    await openViewer(other, ext, 'other.pdf');
+    await ext.cover(other, await layerSpan(other, 'Nothing to cover'));
+    await expect.poll(() => savedCount(ext)).toBe(2);
+
+    // Switched off in the popup's Settings, after confirming the deletion.
+    const popup = await ext.context.newPage();
+    await popup.goto(`chrome-extension://${id}/popup.html`);
+    await expect(popup.locator('#remember-pdf-stickers')).toBeChecked();
+    // Declined: nothing changes.
+    popup.once('dialog', (d) => void d.dismiss());
+    await popup.evaluate(() => document.getElementById('remember-pdf-stickers')!.click());
+    await expect(popup.locator('#remember-pdf-stickers')).toBeChecked();
+    expect(await savedCount(ext)).toBe(2);
+    let asked = '';
+    popup.once('dialog', (d) => {
+      asked = d.message();
+      void d.accept();
+    });
+    await popup.evaluate(() => document.getElementById('remember-pdf-stickers')!.click());
+    await expect
+      .poll(() => ext.worker.evaluate(async () => ((await chrome.storage.local.get('settings')).settings as { rememberPdfStickers?: boolean } | undefined)?.rememberPdfStickers))
+      .toBe(false);
+    expect(asked).toContain('Delete all 2 saved PDF stickers');
+    await popup.close();
+    // Deleted from storage, for every document, and off the open ones.
+    await expect.poll(() => savedCount(ext)).toBe(0);
+    await expect.poll(async () => (await ext.state(page)).stickers.length).toBe(0);
+    await expect(page.locator('#page-1 .textLayer')).toContainText(SSN);
+    await expect.poll(async () => (await ext.state(other)).stickers.length).toBe(0);
+
+    // A sticker placed now covers until the viewer's tab closes and is never written.
+    await watchSaves(ext);
+    await ext.cover(page, await ssnSelector(page));
+    const st = await ext.state(page);
+    expect(st.stickers).toHaveLength(1);
+    // Not an AI-session auto-cover: nothing to keep or drop when a session ends.
+    expect(st.scan?.autoCount ?? 0).toBe(0);
+    await page.waitForTimeout(300);
+    expect(await maxSaved(ext)).toBe(0);
+    expect((await ext.state(page)).stickers).toHaveLength(1);
+    expect(await page.evaluate(() => document.body.innerText)).not.toContain(SSN);
+
+    // A reload keeps it (the tab's memory): an agent reloading the viewer finds the SSN still covered.
+    await page.reload();
+    await waitReady(page);
+    await expect.poll(async () => (await ext.state(page)).stickers.length).toBe(1);
+    expect(await page.evaluate(() => document.body.innerText)).not.toContain(SSN);
+    expect(await maxSaved(ext)).toBe(0);
+    // Opened in another tab: the sticker is gone and the SSN is back in the text layer.
+    const fresh = await ext.context.newPage();
+    await openViewer(fresh, ext, 'sample.pdf');
+    expect((await ext.state(fresh)).stickers).toHaveLength(0);
+    await expect(fresh.locator('#page-1 .textLayer')).toContainText(SSN);
+    // A viewer opened with the setting already off does not save either.
+    await ext.cover(fresh, await ssnSelector(fresh));
+    await fresh.waitForTimeout(300);
+    expect(await maxSaved(ext)).toBe(0);
+    expect((await ext.state(fresh)).stickers).toHaveLength(1);
+    await openViewer(other, ext, 'other.pdf');
+    expect((await ext.state(other)).stickers).toHaveLength(0);
+
+    // During an AI session the switch cannot be changed (stickers must not start lapsing mid-session).
+    const ctl = await ext.context.newPage();
+    await ctl.goto(`chrome-extension://${id}/popup.html`);
+    await session(ext, true);
+    await expect.poll(async () => (await ext.state(page)).lock?.locked, { timeout: 3000 }).toBe(true);
+    await ctl.reload();
+    await expect(ctl.locator('#remember-pdf-stickers')).toBeDisabled();
+  });
+
+  test('"Remember stickers on PDFs" off during an AI session: saved stickers are deleted only when it ends', async ({ page, ext }) => {
+    const id = new URL(ext.worker.url()).host;
+    await openViewer(page, ext, 'sample.pdf');
+    await ext.cover(page, await ssnSelector(page));
+    await expect.poll(() => savedCount(ext)).toBe(1);
+
+    const ctl = await ext.context.newPage();
+    await ctl.goto(`chrome-extension://${id}/popup.html`);
+    await session(ext, true);
+    await expect.poll(async () => (await ext.state(page)).lock?.locked, { timeout: 3000 }).toBe(true);
+    // The popup refuses this while locked; written straight to storage, the deletion must still wait.
+    await rememberOff(ext);
+    await page.waitForTimeout(1000);
+    expect(await savedCount(ext)).toBe(1);
+    // A reload mid-session still finds the sticker.
+    await page.reload();
+    await waitReady(page);
+    await expect.poll(async () => (await ext.state(page)).stickers.length).toBe(1);
+    expect(await page.evaluate(() => document.body.innerText)).not.toContain(SSN);
+
+    await session(ext, false);
+    await expect.poll(() => savedCount(ext), { timeout: 5000 }).toBe(0);
+    await expect.poll(async () => (await ext.state(page)).lock?.locked).toBe(false);
+    await expect.poll(async () => (await ext.state(page)).stickers.length).toBe(0);
+  });
+
+  test('"Remember stickers on PDFs" off during an AI session: auto-covers kept at its end last until the viewer\'s tab closes', async ({ page, ext }) => {
+    const id = new URL(ext.worker.url()).host;
+    await ext.worker.evaluate(() => chrome.storage.local.remove('aibsNoScan'));
+    await openViewer(page, ext, 'sample.pdf');
+    // Not on the SSN's neighbour: a kept auto-cover's anchor reads its label from the neighbouring line.
+    await ext.cover(page, await layerSpan(page, 'Client intake form'));
+    await expect.poll(() => savedCount(ext)).toBe(1);
+
+    const ctl = await ext.context.newPage();
+    await ctl.goto(`chrome-extension://${id}/popup.html`);
+    await session(ext, true);
+    await expect.poll(async () => (await ext.state(page)).lock?.locked, { timeout: 3000 }).toBe(true);
+    // Locked: the scanner covers the SSN on its own.
+    await expect.poll(async () => (await ext.state(page)).scan?.autoCount ?? 0, { timeout: 10_000 }).toBeGreaterThanOrEqual(1);
+    expect(await page.evaluate(() => document.body.innerText)).not.toContain(SSN);
+    await rememberOff(ext);
+
+    // Ended, keeping the auto-covers: the sticker saved before is deleted, the kept ones stay on the open PDF.
+    await session(ext, false);
+    await expect.poll(async () => (await ext.state(page)).lock?.locked).toBe(false);
+    await expect.poll(() => savedCount(ext), { timeout: 5000 }).toBe(0);
+    await expect(page.locator('#page-1 .textLayer')).toContainText('Client intake form');
+    // Nothing is written back afterwards (a write would be deleted at once, so watch the writes).
+    await watchSaves(ext);
+    await page.waitForTimeout(500);
+    expect(await maxSaved(ext)).toBe(0);
+    expect(await page.evaluate(() => document.body.innerText)).not.toContain(SSN);
+
+    // A reload keeps them; another tab does not have them.
+    await page.reload();
+    await waitReady(page);
+    await expect.poll(async () => (await ext.state(page)).stickers.length).toBeGreaterThanOrEqual(1);
+    await expect.poll(() => page.evaluate(() => document.body.innerText), { timeout: 5000 }).not.toContain(SSN);
+    const fresh = await ext.context.newPage();
+    await openViewer(fresh, ext, 'sample.pdf');
+    await expect(fresh.locator('#page-1 .textLayer')).toContainText(SSN);
+    expect((await ext.state(fresh)).stickers).toHaveLength(0);
+  });
+
+  /** Lock the viewer on navigator.webdriver alone: the background is kept from seeing Playwright's debugger. */
+  const webdriverLock = async (ext: Ext, page: Page) => {
+    await ext.worker.evaluate(() => {
+      chrome.debugger.getTargets = (async () => []) as unknown as typeof chrome.debugger.getTargets;
+    });
+    await ext.worker.evaluate(() => chrome.storage.local.remove('aibsNoAutoLock'));
+    await expect.poll(async () => (await ext.state(page)).lock?.locked, { timeout: 5000 }).toBe(true);
+    const { signals } = (await ext.state(page)).lock!;
+    expect(signals.webdriver).toBe(true);
+    expect(signals.debugger).toBe(false);
+  };
+
+  test('"Remember stickers on PDFs" off: a viewer locked by automation holds the deletion; stickers placed meanwhile last until its tab closes', async ({ page, ext }) => {
+    await openViewer(page, ext, 'sample.pdf');
+    await ext.cover(page, await ssnSelector(page));
+    await expect.poll(() => savedCount(ext)).toBe(1);
+
+    // A viewer on another document is open throughout.
+    const other = await ext.context.newPage();
+    await openViewer(other, ext, 'other.pdf');
+    await webdriverLock(ext, page);
+    await rememberOff(ext);
+    await page.waitForTimeout(1000);
+    expect(await savedCount(ext)).toBe(1);
+    // Covered while the deletion waits (the context menu works while locked): not saved, but a reload keeps it.
+    await ext.cover(page, await layerSpan(page, 'Jordan Example'));
+    await page.reload();
+    await waitReady(page);
+    await expect.poll(async () => (await ext.state(page)).stickers.length).toBe(2);
+    await expect.poll(async () => (await ext.state(page)).lock?.locked).toBe(true);
+    await page.waitForTimeout(500);
+    expect(await savedCount(ext)).toBe(1);
+    expect(await page.evaluate(() => document.body.innerText)).not.toContain(SSN);
+    expect(await page.evaluate(() => document.body.innerText)).not.toContain('Jordan Example');
+
+    // Unlocked: the deletion runs; the sticker saved before is gone, the one placed meanwhile stays until the viewer closes.
+    await ext.worker.evaluate(() => chrome.storage.local.set({ aibsNoAutoLock: true }));
+    await expect.poll(async () => (await ext.state(page)).lock?.locked, { timeout: 5000 }).toBe(false);
+    await expect.poll(() => savedCount(ext), { timeout: 5000 }).toBe(0);
+    await expect(page.locator('#page-1 .textLayer')).toContainText(SSN);
+    await expect.poll(async () => (await ext.state(page)).stickers.length).toBe(1);
+    expect(await page.evaluate(() => document.body.innerText)).not.toContain('Jordan Example');
+    // Not in another tab.
+    await openViewer(other, ext, 'sample.pdf');
+    await expect(other.locator('#page-1 .textLayer')).toContainText('Jordan Example');
+
+    // A lock starting writes nothing either.
+    await watchSaves(ext);
+    await webdriverLock(ext, page);
+    await page.waitForTimeout(500);
+    expect(await maxSaved(ext)).toBe(0);
+  });
+
+  test('"Remember stickers on PDFs" off: closing the locked viewer lets the deletion run', async ({ page, ext }) => {
+    const id = new URL(ext.worker.url()).host;
+    await openViewer(page, ext, 'sample.pdf');
+    await ext.cover(page, await ssnSelector(page));
+    await expect.poll(() => savedCount(ext)).toBe(1);
+    await webdriverLock(ext, page);
+    await rememberOff(ext);
+    await page.waitForTimeout(1000);
+    expect(await savedCount(ext)).toBe(1);
+    // Another page keeps the browser open (it exits with its last tab); nothing unlocks, the viewer just closes.
+    const ctl = await ext.context.newPage();
+    await ctl.goto(`chrome-extension://${id}/popup.html`);
+    await page.close();
+    await expect.poll(() => savedCount(ext), { timeout: 5000 }).toBe(0);
+  });
+
+  test('"Remember stickers on PDFs" off: stickers still saved when the service worker starts are deleted', async ({ page, ext }) => {
+    const id = new URL(ext.worker.url()).host;
+    await openViewer(page, ext, 'sample.pdf');
+    await ext.cover(page, await ssnSelector(page));
+    await expect.poll(() => savedCount(ext)).toBe(1);
+    // Saved stickers with the setting already off and nothing to wait for: the state an older version
+    // left behind. A session holds the deletion back while it is set up, then is cleared behind the worker's back.
+    const ctl = await ext.context.newPage();
+    await ctl.goto(`chrome-extension://${id}/popup.html`);
+    await session(ext, true);
+    await expect.poll(async () => (await ext.state(page)).lock?.locked, { timeout: 3000 }).toBe(true);
+    await rememberOff(ext);
+    await ext.worker.evaluate(async () => {
+      await chrome.storage.session.set({ aibsSession: { active: false } });
+      await chrome.storage.local.set({ sessionActive: false });
+    });
+    // No viewer open, so nothing else can set the deletion off.
+    await page.close();
+    await ctl.waitForTimeout(500);
+    const saved = () => ctl.evaluate(async (key) => ((await chrome.storage.local.get(key))[key] as { stickers?: unknown[] } | undefined)?.stickers?.length ?? 0, viewerKey(ext));
+    expect(await saved()).toBe(1);
+
+    // Stop the service worker (CDP), then wake it with a message from an extension page.
+    await ext.worker.evaluate(() => void ((globalThis as unknown as { before: boolean }).before = true));
+    const cdp = await ext.context.newCDPSession(ctl);
+    const { targetInfos } = (await cdp.send('Target.getTargets')) as { targetInfos: { targetId: string; type: string; url: string }[] };
+    const sw = targetInfos.find((t) => t.type === 'service_worker' && t.url.startsWith(`chrome-extension://${id}/`));
+    expect(sw).toBeTruthy();
+    await cdp.send('Target.closeTarget', { targetId: sw!.targetId });
+    await ctl.evaluate(() => chrome.runtime.sendMessage({ type: 'GET_SESSION' }).catch(() => null));
+    // A fresh worker (not the old one still answering).
+    await expect
+      .poll(async () => {
+        for (const w of ext.context.serviceWorkers()) {
+          const fresh = await w.evaluate(() => !(globalThis as unknown as { before?: boolean }).before).catch(() => false);
+          if (fresh) return true;
+        }
+        return false;
+      }, { timeout: 10_000 })
+      .toBe(true);
+    await expect.poll(saved, { timeout: 10_000 }).toBe(0);
+  });
+
+  test('edit text: mouse and keyboard, painted into the canvas, kept through zoom, flattened into the download', async ({ page, ext }, info) => {
+    test.setTimeout(120_000);
+    await openViewer(page, ext, 'sample.pdf');
+    const sel = await ssnSelector(page);
+    await page.click('#edit');
+    await expect.poll(async () => (await ext.state(page)).edits?.tool).not.toBeNull();
+    const b = await boxOf(page, sel);
+    await page.mouse.click(b.x + b.w / 2, b.y + b.h / 2);
+    await expect.poll(async () => (await ext.state(page)).edits?.tool?.open).toBe(true);
+    await page.keyboard.press('ControlOrMeta+A');
+    await page.keyboard.type('SSN on file');
+    await page.keyboard.press('Enter');
+    await expect(page.locator('#page-1 .textLayer')).toContainText('SSN on file');
+    expect(await page.evaluate(() => document.body.innerText)).not.toContain(SSN);
+    // The old digits are gone from the pixels; the new words are drawn where the old ones started.
+    await expect.poll(() => darkest(page, 1, OLD_DIGITS), { timeout: 10_000 }).toBeGreaterThan(200);
+    expect(await darkest(page, 1, NEW_WORDS)).toBeLessThan(120);
+    await page.keyboard.press('Escape');
+    await expect.poll(async () => (await ext.state(page)).edits?.tool).toBeNull();
+    // Out of edit mode: the in-page edit toolbar would sit over the viewer's zoom buttons.
+    await ext.send(page, { type: 'SET_EDIT_MODE', enabled: false });
+
+    // Zoom re-renders the canvas: the edit is painted in before it is shown.
+    const w0 = await page.evaluate(() => document.querySelector<HTMLCanvasElement>('#page-1 canvas')!.width);
+    await page.click('#zoom-in');
+    await page.click('#zoom-in');
+    await expect.poll(() => page.evaluate(() => document.querySelector<HTMLCanvasElement>('#page-1 canvas')!.width)).toBeGreaterThan(w0);
+    expect(await darkest(page, 1, OLD_DIGITS)).toBeGreaterThan(200);
+
+    // Flattened download: no text at all, and the edit is in the pixels.
+    const [dl] = await Promise.all([page.waitForEvent('download'), page.click('#download')]);
+    await expect(page.locator('#status')).toContainText('Edited text is drawn into the pages');
+    const path = info.outputPath('sample-redacted.pdf');
+    await dl.saveAs(path);
+    const out = await pdfText(new Uint8Array(await readFile(path)));
+    expect(out.pages).toBe(2);
+    expect(out.text.join('').trim()).toBe('');
+    await page.setInputFiles('#file', path);
+    await expect(page.locator('#title')).toHaveText('sample-redacted.pdf', { timeout: 20_000 });
+    await waitReady(page);
+    await waitPainted(page, 1);
+    expect((await ext.state(page)).edits?.count).toBe(0);
+    await expect.poll(() => darkest(page, 1, OLD_DIGITS), { timeout: 10_000 }).toBeGreaterThan(200);
+    expect(await darkest(page, 1, NEW_WORDS)).toBeLessThan(120);
+  });
+
+  test('edit text matches the PDF font: the new words have the weight, size and baseline of the original', async ({ page, ext }) => {
+    await openViewer(page, ext, 'resume.pdf');
+    await waitPainted(page, 1);
+    // "JANE Q. EXAMPLE": Helvetica-Bold 26pt, centred, baseline 62pt from the top.
+    const sel = await spanSelector(page, 'JANE Q. EXAMPLE');
+    const box = await page.evaluate((sel) => {
+      const el = document.querySelector(sel)!;
+      const lr = el.closest('.textLayer')!.getBoundingClientRect();
+      const r = el.getBoundingClientRect();
+      const k = 612 / lr.width;
+      return { x: (r.left - lr.left) * k, y: (r.top - lr.top) * k, w: r.width * k, h: r.height * k };
+    }, sel);
+    const area = { x: box.x - 4, y: box.y - box.h * 0.5, w: box.w + 8, h: box.h * 2 };
+    const before = await ink(page, area);
+    expect(before.frac).toBeGreaterThan(0.05);
+
+    // Same length, one letter changed: the whole line is redrawn in the document's own bold font.
+    expect(await ext.send(page, { type: 'TEST_EDIT', selector: sel, value: 'JANE X. EXAMPLE' })).toMatchObject({ ok: true });
+    const after = await ink(page, area);
+    let changed = 0;
+    for (let i = 0; i < before.bits.length; i++) if (before.bits[i] !== after.bits[i]) changed++;
+    expect(changed).toBeGreaterThan(20);
+    // The document's font gives ~0.99 of the original ink; the stand-in font gives ~0.74. The wrong size or
+    // baseline would move the ink's edges.
+    expect(after.frac / before.frac).toBeGreaterThan(0.9);
+    expect(after.frac / before.frac).toBeLessThan(1.1);
+    expect(Math.abs(after.top - before.top)).toBeLessThanOrEqual(1.5);
+    expect(Math.abs(after.bottom - before.bottom)).toBeLessThanOrEqual(1.5);
+  });
+
+  test('edit text: vector download refused, a sticker over an edit wins, viewer chrome is not editable', async ({ page, ext }, info) => {
+    test.setTimeout(90_000);
+    await openViewer(page, ext, 'sample.pdf');
+    const sel = await ssnSelector(page);
+    expect(await ext.send(page, { type: 'TEST_EDIT', selector: sel, value: 'SSN on file' })).toMatchObject({ ok: true });
+    expect(await ext.send(page, { type: 'TEST_EDIT', selector: '#title', value: 'renamed.pdf' })).toMatchObject({ ok: false });
+    await expect(page.locator('#title')).toHaveText('sample.pdf');
+
+    await page.check('#vector');
+    let downloaded = false;
+    page.once('download', () => (downloaded = true));
+    await page.click('#download');
+    await expect(page.locator('#status')).toContainText('Edited text: vector mode');
+    await page.waitForTimeout(500);
+    expect(downloaded).toBe(false);
+    await page.uncheck('#vector');
+
+    await ext.cover(page, sel);
+    const [dl] = await Promise.all([page.waitForEvent('download'), page.click('#download')]);
+    const path = info.outputPath('covered.pdf');
+    await dl.saveAs(path);
+    await page.setInputFiles('#file', path);
+    await expect(page.locator('#title')).toHaveText('covered.pdf', { timeout: 20_000 });
+    await waitReady(page);
+    await waitPainted(page, 1);
+    // The sticker, painted last, is solid black over the whole line, edit included.
+    await expect
+      .poll(async () => Math.max(...(await Promise.all([74, 150].map((x) => canvasPixel(page, 1, x, 792 - 620 - 4)))).flat()), { timeout: 10_000 })
+      .toBeLessThan(40);
+  });
+
+  test('edit text while locked: refused, and a rebuilt text layer never shows the original', async ({ page, ext }) => {
+    await openViewer(page, ext, 'sample.pdf');
+    const sel = await ssnSelector(page);
+    expect(await ext.send(page, { type: 'TEST_EDIT', selector: sel, value: 'SSN on file' })).toMatchObject({ ok: true });
+    await lockTab(ext, page);
+    await page.click('#edit');
+    expect((await ext.state(page)).edits?.tool).toBeNull();
+    expect(await ext.send(page, { type: 'TEST_EDIT', selector: sel, value: 'x' })).toMatchObject({ ok: false, locked: true });
+    expect(await ext.send(page, { type: 'TEST_REVERT_EDITS' })).toMatchObject({ ok: false, locked: true });
+    expect((await ext.state(page)).edits?.count).toBe(1);
+
+    // A script rebuilds page 1's text layer with the original strings.
+    await page.evaluate((ssn) => {
+      const layer = document.querySelector('#page-1 .textLayer')!;
+      const clone = layer.cloneNode(true) as Element;
+      for (const s of clone.querySelectorAll('span')) if (s.textContent?.includes('SSN on file')) s.textContent = `SSN ${ssn}`;
+      layer.replaceWith(clone);
+    }, SSN);
+    await expect.poll(() => page.evaluate(() => document.body.innerText), { timeout: 1500 }).not.toContain(SSN);
+    // After the zoom's re-render (the canvas grows), not on the stretched old one.
+    const width = () => page.evaluate(() => document.querySelector<HTMLCanvasElement>('#page-1 canvas')!.width);
+    const w0 = await width();
+    await page.click('#zoom-in');
+    await expect.poll(width).toBeGreaterThan(w0);
+    expect(await darkest(page, 1, OLD_DIGITS)).toBeGreaterThan(200);
+  });
+
+  test('edit text: opening another document drops the edits', async ({ page, ext }) => {
+    await openViewer(page, ext, 'sample.pdf');
+    expect(await ext.send(page, { type: 'TEST_EDIT', selector: await ssnSelector(page), value: 'SSN on file' })).toMatchObject({ ok: true });
+    await page.setInputFiles('#file', fixture('other.pdf'));
+    await expect(page.locator('#page-1 .textLayer')).toContainText('A different document', { timeout: 20_000 });
+    expect((await ext.state(page)).edits?.count).toBe(0);
+    await page.setInputFiles('#file', fixture('sample.pdf'));
+    await expect(page.locator('#page-1 .textLayer')).toContainText(SSN, { timeout: 20_000 });
+    expect((await ext.state(page)).edits?.count).toBe(0);
   });
 
   test('a local PDF opened by link opens (file access on); a missing one is explained', async ({ page, ext }) => {

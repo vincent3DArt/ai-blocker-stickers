@@ -25,6 +25,86 @@ export interface PageRect extends Rect {
   page: number;
 }
 
+/**
+ * A live text edit on one page, in PDF points: x, y, w are the original text
+ * span's box and h is its font size. The new words are drawn on the span's
+ * baseline in its stand-in font family, scaled horizontally like pdf.js did.
+ */
+export interface PageEdit extends PageRect {
+  text: string;
+  family: string;
+  scaleX: number;
+  /** Cover padding in points (top, right, bottom, left); without it, a fixed share of the font size. */
+  pad?: { t: number; r: number; b: number; l: number };
+  /** CSS font-style/weight words for the new text ("italic bold"), from the PDF font. */
+  style?: string;
+  /** The original text's baseline, in points from the page top; without it, derived from the stand-in font's ascent. */
+  baseline?: number;
+}
+
+/**
+ * Cover padding for an edit (PDF points), a share of the font size `h`,
+ * cut short where another text box on the page is closer: in tightly leaded
+ * text a full pad would erase parts of the neighbouring lines.
+ */
+export function editPad(box: Rect, h: number, others: Rect[]): { t: number; r: number; b: number; l: number } {
+  const pad = { t: 0.1 * h, r: 0.05 * h, b: 0.1 * h, l: 0.05 * h };
+  for (const o of others) {
+    const xOverlap = o.x < box.x + box.w + pad.r && o.x + o.w > box.x - pad.l;
+    const yOverlap = o.y < box.y + h && o.y + o.h > box.y;
+    if (xOverlap && o.y + o.h <= box.y + 0.5 * h && !yOverlap) pad.t = Math.min(pad.t, Math.max(0, box.y - (o.y + o.h)));
+    if (xOverlap && o.y >= box.y + 0.5 * h && !yOverlap) pad.b = Math.min(pad.b, Math.max(0, o.y - (box.y + h)));
+    if (yOverlap && o.x >= box.x + box.w) pad.r = Math.min(pad.r, o.x - (box.x + box.w));
+    if (yOverlap && o.x + o.w <= box.x) pad.l = Math.min(pad.l, box.x - (o.x + o.w));
+  }
+  return pad;
+}
+
+/**
+ * Colours for painting an edit, from rendered RGBA pixels (`w` × `h`) around
+ * and under the original text. `bg` is the most common colour of the ring
+ * outside `inner` (quantised to 4 bits per channel, then averaged); `fg` is
+ * the inner pixel farthest from it, or black/white by bg's lightness when
+ * nothing inside stands out (no ink to match).
+ */
+export function inkColors(px: Uint8ClampedArray, w: number, h: number, inner: Rect): { bg: string; fg: string } {
+  const buckets = new Map<number, [number, number, number, number]>();
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      if (x >= inner.x && x < inner.x + inner.w && y >= inner.y && y < inner.y + inner.h) continue;
+      const i = (y * w + x) * 4;
+      const key = ((px[i] >> 4) << 8) | ((px[i + 1] >> 4) << 4) | (px[i + 2] >> 4);
+      const b = buckets.get(key) ?? [0, 0, 0, 0];
+      b[0] += px[i];
+      b[1] += px[i + 1];
+      b[2] += px[i + 2];
+      b[3]++;
+      buckets.set(key, b);
+    }
+  }
+  let bg: [number, number, number] = [255, 255, 255];
+  let best = 0;
+  for (const b of buckets.values()) {
+    if (b[3] <= best) continue;
+    best = b[3];
+    bg = [Math.round(b[0] / b[3]), Math.round(b[1] / b[3]), Math.round(b[2] / b[3])];
+  }
+  let fg: [number, number, number] | null = null;
+  let far = 0;
+  for (let y = Math.max(0, inner.y); y < Math.min(h, inner.y + inner.h); y++) {
+    for (let x = Math.max(0, inner.x); x < Math.min(w, inner.x + inner.w); x++) {
+      const i = (y * w + x) * 4;
+      const d = Math.abs(px[i] - bg[0]) + Math.abs(px[i + 1] - bg[1]) + Math.abs(px[i + 2] - bg[2]);
+      if (d <= far) continue;
+      far = d;
+      fg = [px[i], px[i + 1], px[i + 2]];
+    }
+  }
+  if (!fg || far < 96) fg = 0.299 * bg[0] + 0.587 * bg[1] + 0.114 * bg[2] > 128 ? [0, 0, 0] : [255, 255, 255];
+  const css = (c: [number, number, number]) => `rgb(${c[0]},${c[1]},${c[2]})`;
+  return { bg: css(bg), fg: css(fg) };
+}
+
 function intersect(a: Rect, b: Rect): Rect | null {
   const x = Math.max(a.x, b.x);
   const y = Math.max(a.y, b.y);

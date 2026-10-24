@@ -16,6 +16,8 @@ export interface TextEditCallbacks {
   lost(): void;
   /** Esc with no editor open. */
   onDone(): void;
+  /** Label of the "every copy" checkbox ("Every copy on this page" by default). */
+  everyLabel?: string;
 }
 
 function textRects(t: Text): ViewRect[] {
@@ -220,7 +222,7 @@ export class TextEditTool {
     const every = document.createElement('input');
     every.type = 'checkbox';
     every.className = 'te-every';
-    label.append(every, document.createTextNode(' Every copy on this page'));
+    label.append(every, document.createTextNode(' ' + (this.cb.everyLabel ?? 'Every copy on this page')));
     row.appendChild(label);
     if (this.cb.isEdited(t)) {
       const revert = document.createElement('button');

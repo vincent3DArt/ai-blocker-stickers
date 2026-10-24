@@ -1,5 +1,5 @@
 import type { ContentToBackground, LockUpdate, SessionInfo } from '@/shared/messages';
-import { listSites, loadSite } from '@/shared/storage';
+import { listSites, loadSettings, loadSite, saveSite, siteKey } from '@/shared/storage';
 import { DEFAULT_TAB_STATE, type SiteRecord, type TabState } from '@/shared/types';
 import { parseOrigin, scriptId } from '@/shared/origin';
 import { AUDIT_KEY, SESSION_ACTIVE_KEY, appendAudit, computeLock, type AuditEntry } from '@/shared/lock';
@@ -171,6 +171,8 @@ const lock = {
   startedAt: 0,
   debuggerTabs: new Set<number>(),
   stickerTabs: new Set<number>(),
+  /** Tabs whose content script last reported a lock (any signal, `navigator.webdriver` included). */
+  lockedTabs: new Set<number>(),
   noAutoLock: false,
 };
 
@@ -189,7 +191,9 @@ async function loadLock(): Promise<void> {
   const dbg = ses[DEBUGGER_TABS_KEY];
   lock.debuggerTabs = new Set(Array.isArray(dbg) ? dbg.filter((n): n is number => typeof n === 'number') : []);
   for (const [k, v] of Object.entries(ses)) {
-    if (k.startsWith('tab:') && (v as TabState | undefined)?.stickerCount) lock.stickerTabs.add(Number(k.slice(4)));
+    if (!k.startsWith('tab:')) continue;
+    if ((v as TabState | undefined)?.stickerCount) lock.stickerTabs.add(Number(k.slice(4)));
+    if ((v as TabState | undefined)?.locked) lock.lockedTabs.add(Number(k.slice(4)));
   }
   lock.noAutoLock = import.meta.env.DEV && devLoc.aibsNoAutoLock === true;
 }
@@ -210,6 +214,36 @@ function pushLock(tabId: number) {
 async function pushLockAll() {
   const tabs = await chrome.tabs.query({});
   for (const t of tabs) if (t.id !== undefined) pushLock(t.id);
+}
+
+// ---- "Remember stickers on PDFs" off ----
+
+/** The PDF viewer runs on the extension's own origin: its stickers are that site's record (read at run time: the build imports this module in Node). */
+const viewerOrigin = () => location.origin;
+let forgetChain: Promise<unknown> = Promise.resolve();
+
+/**
+ * While the setting is off the viewer keeps no saved stickers: the ones from
+ * before are deleted, and so is any an open viewer writes back. Not while an
+ * AI session runs or any viewer tab is locked (a locked viewer reloaded
+ * mid-session must still find them): called again when a lock ends or a tab
+ * closes.
+ */
+function forgetPdfStickers(): Promise<unknown> {
+  forgetChain = forgetChain
+    .then(async () => {
+      await ready;
+      if (lock.session || (await loadSettings()).rememberPdfStickers) return;
+      const rec = await loadSite(viewerOrigin());
+      if (!rec?.stickers.length) return;
+      const viewers = await chrome.runtime.getContexts({ contextTypes: [chrome.runtime.ContextType.TAB] });
+      for (const v of viewers) if (v.documentUrl?.startsWith(`${viewerOrigin()}/pdf.html`) && (await tabLocked(v.tabId))) return;
+      // Turned back on during the checks above: nothing to delete.
+      if ((await loadSettings()).rememberPdfStickers) return;
+      await saveSite({ ...rec, stickers: [], updatedAt: Math.max(Date.now(), rec.updatedAt + 1) });
+    })
+    .catch(() => {});
+  return forgetChain;
 }
 
 // ---- audit log ----
@@ -278,6 +312,7 @@ async function poll(): Promise<void> {
     lock.debuggerTabs = attached;
     await chrome.storage.session.set({ [DEBUGGER_TABS_KEY]: Array.from(attached) });
     for (const id of changed) pushLock(id);
+    void forgetPdfStickers();
   } catch {
     /* getTargets can fail transiently; the next tick retries */
   } finally {
@@ -340,6 +375,7 @@ async function endSession(keepAllSites: boolean, keepAuto = true): Promise<void>
     tabs.map((t) => (t.id === undefined ? undefined : chrome.tabs.sendMessage(t.id, { type: 'SESSION_ENDED', keepAuto }).catch(() => undefined))),
   );
   await pushLockAll();
+  void forgetPdfStickers();
 }
 
 async function sessionInfo(): Promise<SessionInfo> {
@@ -360,6 +396,8 @@ async function setTabState(tabId: number, state: TabState) {
   await chrome.storage.session.set({ [tabKey(tabId)]: state });
   if (state.stickerCount > 0) lock.stickerTabs.add(tabId);
   else lock.stickerTabs.delete(tabId);
+  if (state.locked) lock.lockedTabs.add(tabId);
+  else if (lock.lockedTabs.delete(tabId)) void forgetPdfStickers();
   void ensurePolling();
   await paintBadge(tabId, state);
 }
@@ -478,6 +516,7 @@ export default defineBackground(() => {
 
   // Every service-worker start: resume polling if a sticker tab or a lock survived.
   void ensurePolling();
+  void forgetPdfStickers();
   chrome.alarms.onAlarm.addListener((a) => {
     if (a.name === POLL_ALARM) void poll();
   });
@@ -496,6 +535,7 @@ export default defineBackground(() => {
 
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area !== 'local') return;
+    if (changes.settings || changes[siteKey(viewerOrigin())]) void forgetPdfStickers();
     if (changes.settings) {
       const had = globalDetectors;
       void loadGlobalDetectors().then(() => {
@@ -693,9 +733,12 @@ export default defineBackground(() => {
   chrome.tabs.onRemoved.addListener((tabId) => {
     chrome.storage.session.remove(tabKey(tabId)).catch(() => {});
     lock.stickerTabs.delete(tabId);
+    lock.lockedTabs.delete(tabId);
     if (lock.debuggerTabs.delete(tabId)) {
       chrome.storage.session.set({ [DEBUGGER_TABS_KEY]: Array.from(lock.debuggerTabs) }).catch(() => {});
     }
     void ensurePolling();
+    // A locked viewer closing may be what a deletion was waiting for.
+    void forgetPdfStickers();
   });
 });

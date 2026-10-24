@@ -387,6 +387,12 @@ export interface Settings {
   customDetectors?: CustomDetector[];
   /** Catalogue toggles by entry id (content/detect/catalog.ts); absent: the entry's default. */
   catalog?: Record<string, boolean>;
+  /**
+   * Stickers placed in the PDF viewer are saved for the document (default).
+   * Off: they last until the viewer's tab closes (a reload keeps them), and the background deletes the
+   * saved ones once no viewer is locked.
+   */
+  rememberPdfStickers: boolean;
 }
 
 export type StrictInputsMode = 'locked' | 'always' | 'never';
@@ -407,6 +413,7 @@ export const DEFAULT_SETTINGS: Settings = {
   ghostAnchors: true,
   strictInputs: 'locked',
   scanDefault: true,
+  rememberPdfStickers: true,
   scanSensitivity: 'balanced',
 };
 
@@ -422,6 +429,7 @@ export function normalizeSettings(s: Partial<Settings> | undefined | null): Sett
       ? (src.strictInputs as StrictInputsMode)
       : DEFAULT_SETTINGS.strictInputs,
     scanDefault: typeof src.scanDefault === 'boolean' ? src.scanDefault : DEFAULT_SETTINGS.scanDefault,
+    rememberPdfStickers: typeof src.rememberPdfStickers === 'boolean' ? src.rememberPdfStickers : DEFAULT_SETTINGS.rememberPdfStickers,
     scanSensitivity: SCAN_SENSITIVITIES.includes(src.scanSensitivity as ScanSensitivity)
       ? (src.scanSensitivity as ScanSensitivity)
       : DEFAULT_SETTINGS.scanSensitivity,
