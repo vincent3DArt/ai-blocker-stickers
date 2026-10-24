@@ -276,6 +276,11 @@ export class Masker {
     if (this.strict.engage(rec.root) && rec.peeking) this.strict.lift(rec.root, 'peek');
   }
 
+  /** The real value of a field strict mode holds bullets in, or undefined for any other element. */
+  realValue(el: Element): string | undefined {
+    return this.strict.real(el);
+  }
+
   /** The field's real value: remembered by strict mode, else the live one. */
   private liveValue(rec: MaskRecord): string {
     return this.strict.real(rec.root) ?? (rec.root as HTMLInputElement).value ?? '';
