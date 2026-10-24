@@ -316,7 +316,7 @@ function settingsSection(settings: Settings, locked: boolean, origin: string | n
       await saveSettings({ ...cur, scanSensitivity: v });
     }),
   );
-  return disclosure('settings', 'settings', 'Settings', box, scan, detectorsFieldset(settings, origin, site, invalid, locked), pdfSettingsFieldset());
+  return disclosure('settings', 'settings', 'Settings', box, scan, detectorsFieldset(settings, origin, site, invalid, locked), pdfSettingsFieldset(settings, locked));
 }
 
 const CANVAS_NOTE =
@@ -1047,7 +1047,7 @@ function pdfOpenSection(tab: chrome.tabs.Tab | undefined): HTMLElement {
   return box;
 }
 
-function pdfSettingsFieldset(): HTMLElement {
+function pdfSettingsFieldset(settings: Settings, locked = false): HTMLElement {
   const box = h('fieldset', {});
   const check = h('input', {
     type: 'checkbox',
@@ -1080,6 +1080,32 @@ function pdfSettingsFieldset(): HTMLElement {
       'span',
       { class: 'explain' },
       'Links ending in .pdf open in the extension\'s viewer instead of Chrome\'s. Needs access to all sites. Local files also need "Allow access to file URLs" in chrome://extensions.',
+    ),
+    toggle(
+      h('input', {
+        id: 'remember-pdf-stickers',
+        checked: settings.rememberPdfStickers,
+        // Turning it off would let stickers lapse on a reload mid-session.
+        disabled: locked,
+        title: locked ? 'Locked: change this after the AI session ends' : '',
+        onchange: async (e: Event) => {
+          const box = e.target as HTMLInputElement;
+          // Off deletes the viewer's saved stickers (the background does it): the viewer shares this page's origin.
+          const saved = box.checked ? 0 : ((await loadSite(location.origin))?.stickers.length ?? 0);
+          if (saved && !confirm(`Delete ${saved === 1 ? 'the saved PDF sticker' : `all ${saved} saved PDF stickers`}? They also come off any open PDF. While a viewer is locked (AI session or automation), this waits until the lock ends. Once deleted, they can't be restored.`)) {
+            box.checked = true;
+            return;
+          }
+          const cur = await loadSettings();
+          await saveSettings({ ...cur, rememberPdfStickers: box.checked });
+        },
+      }),
+      'Remember stickers on PDFs',
+    ),
+    h(
+      'span',
+      { class: 'explain' },
+      'On: stickers come back when you open the same file again. Off: saved PDF stickers are deleted, and stickers you place in the viewer last until you close its tab.',
     ),
   );
   return box;

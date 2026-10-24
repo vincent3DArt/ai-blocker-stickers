@@ -1,6 +1,9 @@
 import { MAX_CUSTOM_DETECTORS, cleanDetectors, type CustomDetector, type SiteRecord, type Sticker } from '@/shared/types';
-import { cleanDismissed, loadSite, saveSite, siteKey } from '@/shared/storage';
+import { assertNoCoveredText, cleanDismissed, loadSite, saveSite, siteKey } from '@/shared/storage';
 import { frameApplies, scopeApplies, type PathHmacs } from '@/shared/url-match';
+
+/** sessionStorage key of the viewer's memory-only stickers. */
+const TAB_MEMORY_KEY = 'aibsTemporaryStickers';
 
 /**
  * Content-script view of the site's sticker record. Reads and writes
@@ -11,6 +14,55 @@ import { frameApplies, scopeApplies, type PathHmacs } from '@/shared/url-match';
 export class SiteStore {
   private record: SiteRecord;
   private ephemeral = new Map<string, Sticker>();
+  /**
+   * Stickers the user placed while `remember` was off: memory only (and the
+   * tab's memory, see `useTabMemory`), until the page closes. Unlike
+   * `ephemeral` (the AI session's auto-covers) they are never counted, kept or
+   * dropped at the end of a session.
+   */
+  private temporary = new Map<string, Sticker>();
+
+  /**
+   * False: new stickers stay in `temporary` instead of storage (the PDF viewer,
+   * by setting). Turned back on, those stay there until the page closes:
+   * saving them then would have every open viewer write at once.
+   */
+  remember = true;
+
+  /**
+   * The PDF viewer: memory-only stickers are also kept in this tab's
+   * sessionStorage, so a reload (an agent's, mid-session) still finds them
+   * and closing the tab drops them. Read once, at boot.
+   */
+  useTabMemory(storage: Storage) {
+    this.tabMemory = storage;
+    try {
+      const list = JSON.parse(storage.getItem(TAB_MEMORY_KEY) ?? '[]') as Sticker[];
+      for (const s of list) if (typeof s?.id === 'string' && !this.record.stickers.some((r) => r.id === s.id)) this.temporary.set(s.id, s);
+    } catch {
+      /* unreadable: nothing to restore */
+    }
+  }
+  private tabMemory: Storage | null = null;
+
+  private saveTabMemory() {
+    if (!this.tabMemory) return;
+    // The same privacy guard as chrome.storage: structure and HMACs only.
+    const safe = Array.from(this.temporary.values()).filter((s) => {
+      try {
+        assertNoCoveredText(s);
+        return true;
+      } catch {
+        return false;
+      }
+    });
+    try {
+      if (safe.length) this.tabMemory.setItem(TAB_MEMORY_KEY, JSON.stringify(safe));
+      else this.tabMemory.removeItem(TAB_MEMORY_KEY);
+    } catch {
+      /* quota or blocked: still covered in memory */
+    }
+  }
   /** `updatedAt` of every write this store made that storage has not echoed back yet. */
   private ownWrites = new Set<number>();
   private saveTimer = 0;
@@ -70,26 +122,41 @@ export class SiteStore {
    */
   active(pathname: string, frameDepth: number, hmacs: PathHmacs = {}): Sticker[] {
     const applies = (s: Sticker) => frameApplies(s.frame, frameDepth, hmacs) && scopeApplies(s.scope, pathname, hmacs);
-    return [...this.record.stickers.filter(applies), ...Array.from(this.ephemeral.values()).filter(applies)];
+    return [
+      ...this.record.stickers.filter(applies),
+      ...Array.from(this.ephemeral.values()).filter(applies),
+      ...Array.from(this.temporary.values()).filter(applies),
+    ];
   }
 
   get(id: string): Sticker | undefined {
-    return this.ephemeral.get(id) ?? this.record.stickers.find((s) => s.id === id);
+    return this.ephemeral.get(id) ?? this.temporary.get(id) ?? this.record.stickers.find((s) => s.id === id);
   }
 
   upsert(sticker: Sticker) {
-    if (this.ephemeral.has(sticker.id)) {
-      this.ephemeral.set(sticker.id, sticker);
+    for (const memory of [this.ephemeral, this.temporary]) {
+      if (!memory.has(sticker.id)) continue;
+      memory.set(sticker.id, sticker);
+      if (memory === this.temporary) this.saveTabMemory();
       return;
     }
     const i = this.record.stickers.findIndex((s) => s.id === sticker.id);
     if (i >= 0) this.record.stickers[i] = sticker;
-    else this.record.stickers.push(sticker);
+    else if (!this.remember) {
+      this.temporary.set(sticker.id, sticker);
+      return this.saveTabMemory();
+    } else this.record.stickers.push(sticker);
     this.scheduleSave();
+  }
+
+  /** Held in memory because stickers were not being remembered when it was placed. */
+  isTemporary(id: string): boolean {
+    return this.temporary.has(id);
   }
 
   remove(id: string) {
     if (this.ephemeral.delete(id)) return;
+    if (this.temporary.delete(id)) return this.saveTabMemory();
     this.record.stickers = this.record.stickers.filter((s) => s.id !== id);
     this.scheduleSave();
   }
@@ -118,10 +185,14 @@ export class SiteStore {
     if (!ids.length) return ids;
     // Backstop covers belong to a lost sticker and stay session-only.
     for (const id of ids) {
-      this.record.stickers.push(this.ephemeral.get(id)!);
+      const s = this.ephemeral.get(id)!;
       this.ephemeral.delete(id);
+      // Not remembering (the PDF viewer, by setting): kept until the page closes, never saved.
+      if (this.remember) this.record.stickers.push(s);
+      else this.temporary.set(id, s);
     }
-    this.scheduleSave();
+    if (this.remember) this.scheduleSave();
+    else this.saveTabMemory();
     return ids;
   }
 

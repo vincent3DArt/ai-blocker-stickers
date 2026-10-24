@@ -196,6 +196,288 @@ test.describe('PDF viewer', () => {
     expect(await page.locator('.textLayer').first().innerText()).not.toContain(SSN);
   });
 
+  /** Storage key of the viewer's stickers (all documents share the extension's own site record). */
+  const viewerKey = (ext: Ext) => `site:chrome-extension://${new URL(ext.worker.url()).host}`;
+  const savedCount = (ext: Ext) =>
+    ext.worker.evaluate(async (key) => ((await chrome.storage.local.get(key))[key] as { stickers?: unknown[] } | undefined)?.stickers?.length ?? 0, viewerKey(ext));
+  /** Records the most stickers any write to the viewer's key held from now on (a wrong save is deleted at once, so the count alone hides it). */
+  const watchSaves = (ext: Ext) =>
+    ext.worker.evaluate((key) => {
+      const g = globalThis as unknown as { maxSaved: number };
+      g.maxSaved = 0;
+      chrome.storage.onChanged.addListener((c) => {
+        g.maxSaved = Math.max(g.maxSaved, (c[key]?.newValue as { stickers?: unknown[] } | undefined)?.stickers?.length ?? 0);
+      });
+    }, viewerKey(ext));
+  const maxSaved = (ext: Ext) => ext.worker.evaluate(() => (globalThis as unknown as { maxSaved: number }).maxSaved);
+  const rememberOff = (ext: Ext) =>
+    ext.worker.evaluate(async () => {
+      const cur = (await chrome.storage.local.get('settings')).settings as Record<string, unknown> | undefined;
+      await chrome.storage.local.set({ settings: { ...cur, rememberPdfStickers: false } });
+    });
+  /** CSS selector of the text-layer span holding `needle`. */
+  const layerSpan = async (page: Page, needle: string) => {
+    const i = await page.evaluate((n) => Array.from(document.querySelectorAll('#page-1 .textLayer > *')).findIndex((k) => k.textContent?.includes(n)), needle);
+    expect(i).toBeGreaterThanOrEqual(0);
+    return `#page-1 > .textLayer > :nth-child(${i + 1})`;
+  };
+  const session = (ext: Ext, active: boolean) =>
+    // Sent from an extension page; the open viewer also hears runtime messages and may answer first, so callers wait for the lock.
+    ext.context.pages().find((p) => p.url().includes('/popup.html'))!.evaluate((a) => chrome.runtime.sendMessage({ type: 'TEST_SESSION', active: a }).catch(() => null), active);
+
+  test('"Remember stickers on PDFs" off: saved stickers are deleted, new ones last until the viewer\'s tab closes', async ({ page, ext }) => {
+    const id = new URL(ext.worker.url()).host;
+    // On by default: stickers are saved for each document.
+    await openViewer(page, ext, 'sample.pdf');
+    await ext.cover(page, await ssnSelector(page));
+    const other = await ext.context.newPage();
+    await openViewer(other, ext, 'other.pdf');
+    await ext.cover(other, await layerSpan(other, 'Nothing to cover'));
+    await expect.poll(() => savedCount(ext)).toBe(2);
+
+    // Switched off in the popup's Settings, after confirming the deletion.
+    const popup = await ext.context.newPage();
+    await popup.goto(`chrome-extension://${id}/popup.html`);
+    await expect(popup.locator('#remember-pdf-stickers')).toBeChecked();
+    // Declined: nothing changes.
+    popup.once('dialog', (d) => void d.dismiss());
+    await popup.evaluate(() => document.getElementById('remember-pdf-stickers')!.click());
+    await expect(popup.locator('#remember-pdf-stickers')).toBeChecked();
+    expect(await savedCount(ext)).toBe(2);
+    let asked = '';
+    popup.once('dialog', (d) => {
+      asked = d.message();
+      void d.accept();
+    });
+    await popup.evaluate(() => document.getElementById('remember-pdf-stickers')!.click());
+    await expect
+      .poll(() => ext.worker.evaluate(async () => ((await chrome.storage.local.get('settings')).settings as { rememberPdfStickers?: boolean } | undefined)?.rememberPdfStickers))
+      .toBe(false);
+    expect(asked).toContain('Delete all 2 saved PDF stickers');
+    await popup.close();
+    // Deleted from storage, for every document, and off the open ones.
+    await expect.poll(() => savedCount(ext)).toBe(0);
+    await expect.poll(async () => (await ext.state(page)).stickers.length).toBe(0);
+    await expect(page.locator('#page-1 .textLayer')).toContainText(SSN);
+    await expect.poll(async () => (await ext.state(other)).stickers.length).toBe(0);
+
+    // A sticker placed now covers until the viewer's tab closes and is never written.
+    await watchSaves(ext);
+    await ext.cover(page, await ssnSelector(page));
+    const st = await ext.state(page);
+    expect(st.stickers).toHaveLength(1);
+    // Not an AI-session auto-cover: nothing to keep or drop when a session ends.
+    expect(st.scan?.autoCount ?? 0).toBe(0);
+    await page.waitForTimeout(300);
+    expect(await maxSaved(ext)).toBe(0);
+    expect((await ext.state(page)).stickers).toHaveLength(1);
+    expect(await page.evaluate(() => document.body.innerText)).not.toContain(SSN);
+
+    // A reload keeps it (the tab's memory): an agent reloading the viewer finds the SSN still covered.
+    await page.reload();
+    await waitReady(page);
+    await expect.poll(async () => (await ext.state(page)).stickers.length).toBe(1);
+    expect(await page.evaluate(() => document.body.innerText)).not.toContain(SSN);
+    expect(await maxSaved(ext)).toBe(0);
+    // Opened in another tab: the sticker is gone and the SSN is back in the text layer.
+    const fresh = await ext.context.newPage();
+    await openViewer(fresh, ext, 'sample.pdf');
+    expect((await ext.state(fresh)).stickers).toHaveLength(0);
+    await expect(fresh.locator('#page-1 .textLayer')).toContainText(SSN);
+    // A viewer opened with the setting already off does not save either.
+    await ext.cover(fresh, await ssnSelector(fresh));
+    await fresh.waitForTimeout(300);
+    expect(await maxSaved(ext)).toBe(0);
+    expect((await ext.state(fresh)).stickers).toHaveLength(1);
+    await openViewer(other, ext, 'other.pdf');
+    expect((await ext.state(other)).stickers).toHaveLength(0);
+
+    // During an AI session the switch cannot be changed (stickers must not start lapsing mid-session).
+    const ctl = await ext.context.newPage();
+    await ctl.goto(`chrome-extension://${id}/popup.html`);
+    await session(ext, true);
+    await expect.poll(async () => (await ext.state(page)).lock?.locked, { timeout: 3000 }).toBe(true);
+    await ctl.reload();
+    await expect(ctl.locator('#remember-pdf-stickers')).toBeDisabled();
+  });
+
+  test('"Remember stickers on PDFs" off during an AI session: saved stickers are deleted only when it ends', async ({ page, ext }) => {
+    const id = new URL(ext.worker.url()).host;
+    await openViewer(page, ext, 'sample.pdf');
+    await ext.cover(page, await ssnSelector(page));
+    await expect.poll(() => savedCount(ext)).toBe(1);
+
+    const ctl = await ext.context.newPage();
+    await ctl.goto(`chrome-extension://${id}/popup.html`);
+    await session(ext, true);
+    await expect.poll(async () => (await ext.state(page)).lock?.locked, { timeout: 3000 }).toBe(true);
+    // The popup refuses this while locked; written straight to storage, the deletion must still wait.
+    await rememberOff(ext);
+    await page.waitForTimeout(1000);
+    expect(await savedCount(ext)).toBe(1);
+    // A reload mid-session still finds the sticker.
+    await page.reload();
+    await waitReady(page);
+    await expect.poll(async () => (await ext.state(page)).stickers.length).toBe(1);
+    expect(await page.evaluate(() => document.body.innerText)).not.toContain(SSN);
+
+    await session(ext, false);
+    await expect.poll(() => savedCount(ext), { timeout: 5000 }).toBe(0);
+    await expect.poll(async () => (await ext.state(page)).lock?.locked).toBe(false);
+    await expect.poll(async () => (await ext.state(page)).stickers.length).toBe(0);
+  });
+
+  test('"Remember stickers on PDFs" off during an AI session: auto-covers kept at its end last until the viewer\'s tab closes', async ({ page, ext }) => {
+    const id = new URL(ext.worker.url()).host;
+    await ext.worker.evaluate(() => chrome.storage.local.remove('aibsNoScan'));
+    await openViewer(page, ext, 'sample.pdf');
+    // Not on the SSN's neighbour: a kept auto-cover's anchor reads its label from the neighbouring line.
+    await ext.cover(page, await layerSpan(page, 'Client intake form'));
+    await expect.poll(() => savedCount(ext)).toBe(1);
+
+    const ctl = await ext.context.newPage();
+    await ctl.goto(`chrome-extension://${id}/popup.html`);
+    await session(ext, true);
+    await expect.poll(async () => (await ext.state(page)).lock?.locked, { timeout: 3000 }).toBe(true);
+    // Locked: the scanner covers the SSN on its own.
+    await expect.poll(async () => (await ext.state(page)).scan?.autoCount ?? 0, { timeout: 10_000 }).toBeGreaterThanOrEqual(1);
+    expect(await page.evaluate(() => document.body.innerText)).not.toContain(SSN);
+    await rememberOff(ext);
+
+    // Ended, keeping the auto-covers: the sticker saved before is deleted, the kept ones stay on the open PDF.
+    await session(ext, false);
+    await expect.poll(async () => (await ext.state(page)).lock?.locked).toBe(false);
+    await expect.poll(() => savedCount(ext), { timeout: 5000 }).toBe(0);
+    await expect(page.locator('#page-1 .textLayer')).toContainText('Client intake form');
+    // Nothing is written back afterwards (a write would be deleted at once, so watch the writes).
+    await watchSaves(ext);
+    await page.waitForTimeout(500);
+    expect(await maxSaved(ext)).toBe(0);
+    expect(await page.evaluate(() => document.body.innerText)).not.toContain(SSN);
+
+    // A reload keeps them; another tab does not have them.
+    await page.reload();
+    await waitReady(page);
+    await expect.poll(async () => (await ext.state(page)).stickers.length).toBeGreaterThanOrEqual(1);
+    await expect.poll(() => page.evaluate(() => document.body.innerText), { timeout: 5000 }).not.toContain(SSN);
+    const fresh = await ext.context.newPage();
+    await openViewer(fresh, ext, 'sample.pdf');
+    await expect(fresh.locator('#page-1 .textLayer')).toContainText(SSN);
+    expect((await ext.state(fresh)).stickers).toHaveLength(0);
+  });
+
+  /** Lock the viewer on navigator.webdriver alone: the background is kept from seeing Playwright's debugger. */
+  const webdriverLock = async (ext: Ext, page: Page) => {
+    await ext.worker.evaluate(() => {
+      chrome.debugger.getTargets = (async () => []) as unknown as typeof chrome.debugger.getTargets;
+    });
+    await ext.worker.evaluate(() => chrome.storage.local.remove('aibsNoAutoLock'));
+    await expect.poll(async () => (await ext.state(page)).lock?.locked, { timeout: 5000 }).toBe(true);
+    const { signals } = (await ext.state(page)).lock!;
+    expect(signals.webdriver).toBe(true);
+    expect(signals.debugger).toBe(false);
+  };
+
+  test('"Remember stickers on PDFs" off: a viewer locked by automation holds the deletion; stickers placed meanwhile last until its tab closes', async ({ page, ext }) => {
+    await openViewer(page, ext, 'sample.pdf');
+    await ext.cover(page, await ssnSelector(page));
+    await expect.poll(() => savedCount(ext)).toBe(1);
+
+    // A viewer on another document is open throughout.
+    const other = await ext.context.newPage();
+    await openViewer(other, ext, 'other.pdf');
+    await webdriverLock(ext, page);
+    await rememberOff(ext);
+    await page.waitForTimeout(1000);
+    expect(await savedCount(ext)).toBe(1);
+    // Covered while the deletion waits (the context menu works while locked): not saved, but a reload keeps it.
+    await ext.cover(page, await layerSpan(page, 'Jordan Example'));
+    await page.reload();
+    await waitReady(page);
+    await expect.poll(async () => (await ext.state(page)).stickers.length).toBe(2);
+    await expect.poll(async () => (await ext.state(page)).lock?.locked).toBe(true);
+    await page.waitForTimeout(500);
+    expect(await savedCount(ext)).toBe(1);
+    expect(await page.evaluate(() => document.body.innerText)).not.toContain(SSN);
+    expect(await page.evaluate(() => document.body.innerText)).not.toContain('Jordan Example');
+
+    // Unlocked: the deletion runs; the sticker saved before is gone, the one placed meanwhile stays until the viewer closes.
+    await ext.worker.evaluate(() => chrome.storage.local.set({ aibsNoAutoLock: true }));
+    await expect.poll(async () => (await ext.state(page)).lock?.locked, { timeout: 5000 }).toBe(false);
+    await expect.poll(() => savedCount(ext), { timeout: 5000 }).toBe(0);
+    await expect(page.locator('#page-1 .textLayer')).toContainText(SSN);
+    await expect.poll(async () => (await ext.state(page)).stickers.length).toBe(1);
+    expect(await page.evaluate(() => document.body.innerText)).not.toContain('Jordan Example');
+    // Not in another tab.
+    await openViewer(other, ext, 'sample.pdf');
+    await expect(other.locator('#page-1 .textLayer')).toContainText('Jordan Example');
+
+    // A lock starting writes nothing either.
+    await watchSaves(ext);
+    await webdriverLock(ext, page);
+    await page.waitForTimeout(500);
+    expect(await maxSaved(ext)).toBe(0);
+  });
+
+  test('"Remember stickers on PDFs" off: closing the locked viewer lets the deletion run', async ({ page, ext }) => {
+    const id = new URL(ext.worker.url()).host;
+    await openViewer(page, ext, 'sample.pdf');
+    await ext.cover(page, await ssnSelector(page));
+    await expect.poll(() => savedCount(ext)).toBe(1);
+    await webdriverLock(ext, page);
+    await rememberOff(ext);
+    await page.waitForTimeout(1000);
+    expect(await savedCount(ext)).toBe(1);
+    // Another page keeps the browser open (it exits with its last tab); nothing unlocks, the viewer just closes.
+    const ctl = await ext.context.newPage();
+    await ctl.goto(`chrome-extension://${id}/popup.html`);
+    await page.close();
+    await expect.poll(() => savedCount(ext), { timeout: 5000 }).toBe(0);
+  });
+
+  test('"Remember stickers on PDFs" off: stickers still saved when the service worker starts are deleted', async ({ page, ext }) => {
+    const id = new URL(ext.worker.url()).host;
+    await openViewer(page, ext, 'sample.pdf');
+    await ext.cover(page, await ssnSelector(page));
+    await expect.poll(() => savedCount(ext)).toBe(1);
+    // Saved stickers with the setting already off and nothing to wait for: the state an older version
+    // left behind. A session holds the deletion back while it is set up, then is cleared behind the worker's back.
+    const ctl = await ext.context.newPage();
+    await ctl.goto(`chrome-extension://${id}/popup.html`);
+    await session(ext, true);
+    await expect.poll(async () => (await ext.state(page)).lock?.locked, { timeout: 3000 }).toBe(true);
+    await rememberOff(ext);
+    await ext.worker.evaluate(async () => {
+      await chrome.storage.session.set({ aibsSession: { active: false } });
+      await chrome.storage.local.set({ sessionActive: false });
+    });
+    // No viewer open, so nothing else can set the deletion off.
+    await page.close();
+    await ctl.waitForTimeout(500);
+    const saved = () => ctl.evaluate(async (key) => ((await chrome.storage.local.get(key))[key] as { stickers?: unknown[] } | undefined)?.stickers?.length ?? 0, viewerKey(ext));
+    expect(await saved()).toBe(1);
+
+    // Stop the service worker (CDP), then wake it with a message from an extension page.
+    await ext.worker.evaluate(() => void ((globalThis as unknown as { before: boolean }).before = true));
+    const cdp = await ext.context.newCDPSession(ctl);
+    const { targetInfos } = (await cdp.send('Target.getTargets')) as { targetInfos: { targetId: string; type: string; url: string }[] };
+    const sw = targetInfos.find((t) => t.type === 'service_worker' && t.url.startsWith(`chrome-extension://${id}/`));
+    expect(sw).toBeTruthy();
+    await cdp.send('Target.closeTarget', { targetId: sw!.targetId });
+    await ctl.evaluate(() => chrome.runtime.sendMessage({ type: 'GET_SESSION' }).catch(() => null));
+    // A fresh worker (not the old one still answering).
+    await expect
+      .poll(async () => {
+        for (const w of ext.context.serviceWorkers()) {
+          const fresh = await w.evaluate(() => !(globalThis as unknown as { before?: boolean }).before).catch(() => false);
+          if (fresh) return true;
+        }
+        return false;
+      }, { timeout: 10_000 })
+      .toBe(true);
+    await expect.poll(saved, { timeout: 10_000 }).toBe(0);
+  });
+
   test('edit text: mouse and keyboard, painted into the canvas, kept through zoom, flattened into the download', async ({ page, ext }, info) => {
     test.setTimeout(120_000);
     await openViewer(page, ext, 'sample.pdf');

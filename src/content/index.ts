@@ -217,6 +217,14 @@ export async function boot(opts: BootOptions = {}): Promise<BootApi | undefined>
   // Dev only: fail the way a broken build would, before anything is mounted (cloak failsafe test).
   if (import.meta.env.DEV && devLocal.aibsFailBoot === true) throw new Error('simulated boot failure (dev)');
   let settings: Settings = settingsLoaded;
+  // The PDF viewer (the only extension page running the engine) follows "Remember stickers on PDFs".
+  // Off, its stickers stay in memory and in the tab's sessionStorage: a reload keeps them (an agent's
+  // mid-session too), closing the tab drops them.
+  if (extensionPage) store.useTabMemory(sessionStorage);
+  const syncRemember = () => {
+    store.remember = !extensionPage || settings.rememberPdfStickers;
+  };
+  syncRemember();
   // The host is mounted before the key import so the boot cloak can come off
   // the moment storage says nothing here needs covering.
   const host = mountHost();
@@ -380,9 +388,10 @@ export async function boot(opts: BootOptions = {}): Promise<BootApi | undefined>
   const currentLock = (): LockState =>
     computeLock({ debuggerAttached: bgLock.debugger, manualSession: bgLock.manual || localSession, webdriver: webdriver() });
   let lock: LockState = currentLock();
+  // Before setLocked, whose state report must already say locked (the background waits on it).
+  tabState = { ...tabState, locked: lock.locked, lockReason: lock.reason };
   session.setLocked(lock.locked);
   edits.setLocked(lock.locked);
-  tabState = { ...tabState, locked: lock.locked, lockReason: lock.reason };
 
   /**
    * Strict input masking follows the setting: always, never, or (default)
@@ -1338,6 +1347,7 @@ export async function boot(opts: BootOptions = {}): Promise<BootApi | undefined>
     if (area === 'local' && changes.settings?.newValue) {
       const prev = settings;
       settings = normalizeSettings(changes.settings.newValue as Partial<Settings>);
+      syncRemember();
       host.setColor(settings.appearance.color);
       updateStrict();
       sendState({ strictInputs: masker.strictCount() });
