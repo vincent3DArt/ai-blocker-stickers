@@ -110,8 +110,13 @@ async function rasterMax(page: Page, ext: Ext, file: string, rects: PtRect[]): P
   await expect(page.locator('body')).not.toHaveAttribute('data-doc-key', before!, { timeout: 20_000 });
   await waitReady(page);
   expect((await ext.state(page)).stickers).toHaveLength(0);
-  // The canvas renders asynchronously (paper first, then the page image): wait for kept text to show.
-  await expect.poll(async () => (await page.evaluate(sampleCanvas, rects)).ink, { timeout: 10_000 }).toBeLessThan(100);
+  // The canvas renders asynchronously and a blank one reads 0 everywhere: wait for both the paper and the kept text to show.
+  await expect
+    .poll(async () => {
+      const s = await page.evaluate(sampleCanvas, rects);
+      return s.control > 240 && s.ink < 100;
+    }, { timeout: 10_000 })
+    .toBe(true);
   return page.evaluate(sampleCanvas, rects);
 }
 

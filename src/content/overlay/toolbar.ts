@@ -1,19 +1,22 @@
 import type { OverlayHost } from './host';
 import { icon, type IconName } from '@/shared/icons';
 
-export type ToolbarAction = 'pick' | 'rect' | 'selection' | 'teach' | 'suggestions' | 'done';
+export type ToolbarAction = 'pick' | 'rect' | 'selection' | 'edit' | 'revertEdits' | 'teach' | 'suggestions' | 'done';
 
 export interface ToolbarCallbacks {
   onAction(action: ToolbarAction): void;
+  /** False where page text cannot be edited (the PDF viewer). */
+  textEdit?: boolean;
 }
 
 /** chrome.storage.local keys: where the user dragged the toolbar, and whether the first-use hint was seen. */
 const POS_KEY = 'settings.toolbarPos';
 const HINT_KEY = 'settings.toolbarHint';
 
-const HINTS: Record<'pick' | 'rect' | 'idle', Array<string | [string]>> = {
+const HINTS: Record<'pick' | 'rect' | 'edit' | 'idle', Array<string | [string]>> = {
   pick: ['Hover an element and click to cover it. ', ['↑'], ' / ', ['↓'], ' parent or child, ', ['Esc'], ' finishes.'],
   rect: ['Drag a box over anything to cover it. ', ['Esc'], ' finishes.'],
+  edit: ['Click any text to change it. ', ['Enter'], ' saves, ', ['Esc'], ' finishes. Edits last until reload.'],
   idle: ['Hover an element and click to cover it. ', ['Esc'], ' finishes.'],
 };
 
@@ -81,6 +84,14 @@ export class Toolbar {
     add('pick', 'Cover element', 'sticker');
     add('rect', 'Draw rectangle', 'rect');
     add('selection', 'Cover selection', 'textSelect');
+    if (cb.textEdit !== false) {
+      add('edit', 'Edit text', 'pencil');
+      add('revertEdits', 'Revert edits', null);
+      this.editCount = document.createElement('span');
+      this.editCount.className = 'count';
+      this.buttons.get('revertEdits')!.appendChild(this.editCount);
+      this.buttons.get('revertEdits')!.style.display = 'none';
+    }
     add('teach', 'Cover things like this…', 'sparkle');
     // Clicking a toolbar button must not drop the page selection it acts on.
     this.buttons.get('teach')!.addEventListener('mousedown', (e) => e.preventDefault());
@@ -116,6 +127,8 @@ export class Toolbar {
 
   private canvasHint: HTMLSpanElement;
   private suggestCount: HTMLSpanElement;
+  private editCount: HTMLSpanElement | null = null;
+  private edits = 0;
   private canvas = false;
   private suggestionCount = 0;
 
@@ -127,8 +140,24 @@ export class Toolbar {
     if (this.canvas === on) return;
     this.canvas = on;
     this.buttons.get('pick')!.style.display = on ? 'none' : '';
+    const edit = this.buttons.get('edit');
+    if (edit) edit.style.display = on ? 'none' : '';
     this.renderHint();
     this.updateSuggestions();
+    this.updateEdits();
+  }
+
+  /** "Revert edits (n)": hidden when nothing on the page is edited. */
+  setEdits(n: number) {
+    this.edits = n;
+    this.buttons.get('revertEdits')?.setAttribute('aria-label', `Revert edits (${n})`);
+    if (this.editCount) this.editCount.textContent = String(n);
+    this.updateEdits();
+  }
+
+  private updateEdits() {
+    const b = this.buttons.get('revertEdits');
+    if (b) b.style.display = this.edits > 0 && !this.canvas ? '' : 'none';
   }
 
   get canvasMode(): boolean {
@@ -199,7 +228,8 @@ export class Toolbar {
       this.hintEl.replaceChildren(this.canvasHint);
       return;
     }
-    const which = this.active === 'pick' ? 'pick' : this.active === 'rect' ? 'rect' : this.hintSeen ? null : 'idle';
+    const which =
+      this.active === 'pick' || this.active === 'rect' || this.active === 'edit' ? this.active : this.hintSeen ? null : 'idle';
     if (!which) {
       this.hintEl.replaceChildren();
       return;

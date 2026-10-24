@@ -31,6 +31,8 @@ export interface TestState {
   };
   /** Strict input masking: whether it applies in this tab, and how many fields it holds. */
   strict?: { on: boolean; count: number };
+  /** Live text edits: how many, how many nodes show one, and the Edit text tool (null when off). */
+  edits?: { count: number; nodes: number; tool: { open: boolean } | null };
   /** Auto-suggest scanner. */
   scan?: {
     active: boolean;
@@ -74,9 +76,10 @@ export const test = base.extend<{ ext: Ext; page: Page }>({
     });
     let [worker] = context.serviceWorkers();
     if (!worker) worker = await context.waitForEvent('serviceworker');
-    // Give onInstalled a moment to register the fixture origin.
+    // Give onInstalled a moment to register the fixture origin: up to 15 s, since a
+    // loaded CI runner (windows-latest) can take more than the 5 s this used to allow.
     await worker.evaluate(async () => {
-      for (let i = 0; i < 50; i++) {
+      for (let i = 0; i < 150; i++) {
         const scripts = await chrome.scripting.getRegisteredContentScripts();
         if (scripts.length > 0) return;
         await new Promise((r) => setTimeout(r, 100));
@@ -125,6 +128,17 @@ export const test = base.extend<{ ext: Ext; page: Page }>({
 export const expect = test.expect;
 
 /** Viewport rect of an element via the page's own layout. */
+/** Start a manual AI session (from an extension page, like the popup) and wait until `page` is locked. */
+export async function lockTab(ext: Ext, page: Page) {
+  const id = new URL(ext.worker.url()).host;
+  const ctl = await ext.context.newPage();
+  await ctl.goto(`chrome-extension://${id}/popup.html`);
+  // Every extension page hears runtime messages, an open PDF viewer included (dev builds answer TEST_* there),
+  // so the reply may not be the background's: wait for the lock itself.
+  await ctl.evaluate(() => chrome.runtime.sendMessage({ type: 'TEST_SESSION', active: true }).catch(() => null));
+  await expect.poll(async () => (await ext.state(page)).lock?.locked, { timeout: 3000 }).toBe(true);
+}
+
 export async function boxOf(page: Page, selector: string) {
   return page.evaluate((sel) => {
     const el = document.querySelector(sel)!;

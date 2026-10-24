@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Zelda Quarry · Client file</title>
+<style>
+  body { font: 16px/1.5 system-ui, sans-serif; margin: 24px; }
+  p { margin: 10px 0; }
+  button { font: inherit; padding: 6px 12px; }
+</style>
+</head>
+<body>
+<!-- Fake client data for the Edit text tests. Nothing here is real. -->
+<h1 id="name">Zelda Quarry</h1>
+<p id="link-line"><a id="link" href="#navigated" title="Open Zelda Quarry" aria-label="Open Zelda Quarry's file">Hello <b>Zelda</b> Quarry</a></p>
+<p><button id="btn" type="button">Click count: <span id="count">0</span></button></p>
+<p><label><input id="chk" type="checkbox"> Mark Zelda Quarry as reviewed</label></p>
+<p id="copy">Contact: Zelda Quarry, 12 Elm Street</p>
+<p id="rtl" dir="rtl">שלום זלדה</p>
+<p id="native" contenteditable="true">Native editor text</p>
+<div id="app"><p id="react">Zelda Quarry</p></div>
+<script>
+  let n = 0;
+  document.getElementById('btn').addEventListener('click', () => {
+    document.getElementById('count').textContent = String(++n);
+  });
+  // Ways a framework puts the original text back.
+  window.__fx = {
+    setData() { document.getElementById('react').firstChild.data = 'Zelda Quarry'; },
+    textContent() { document.getElementById('react').textContent = 'Zelda Quarry'; },
+    innerHTML() { document.getElementById('app').innerHTML = '<p id="react">Zelda Quarry</p>'; },
+    replaceClone() {
+      const c = document.createElement('p');
+      c.id = 'react';
+      c.textContent = 'Zelda Quarry';
+      document.getElementById('react').replaceWith(c);
+    },
+    partial() { document.getElementById('react').textContent = 'Ms. Zelda Q.'; },
+  };
+</script>
+</body>
+</html>

@@ -132,6 +132,19 @@ as you like; `Esc` finishes.
 **Cover selection.** Select text and press `Alt+Shift+C`. If the selection covers most of one
 element, you get an element sticker; otherwise you get a rectangle.
 
+**Edit text.** Change text on any web page without opening DevTools. Choose **Edit text** in the
+edit-mode toolbar, click the text and type; `Enter` saves and `Esc` cancels. The tool stays on for
+the next text until you press `Esc` again. Clicks on links and buttons are swallowed while it is on.
+Bold, links and other formatting around the changed words stay as they are. Attributes that repeat
+the text (`title`, `aria-label`, `alt`…) follow the edit. If the same text appears elsewhere on the
+page, a toast says how many copies are left; tick **Every copy on this page** to change them and the
+tab title too. Edits last until the page reloads: nothing is stored. **Revert edits** in the toolbar
+undoes them all, and **Revert** in the editor undoes one. When the page re-renders the text, the
+edit is put back before it paints. During an AI session the tool and both reverts are refused,
+edits stay in place, and undo cannot bring the old text back (edits never go through the page's
+editing commands). An edit changes what the page shows; it is not a sticker. See
+[docs/LIMITATIONS.md](docs/LIMITATIONS.md#edited-text) before relying on it to hide anything.
+
 **Right-click.** The context menu offers "Cover this element with a sticker".
 
 **Peek.** Hover a sticker and hold `Ctrl+Shift` to reveal it briefly. `Ctrl+Shift+Space` reveals all
@@ -283,6 +296,18 @@ or any viewer tab is locked (a debugger or automation attached), the deletion wa
 ends. Stickers placed while it was off stay in their tab until it closes, even if you turn it back
 on. It cannot be turned off during an AI session.
 
+**Edit text in the viewer.** **Edit text** in the viewer's toolbar works as on web pages: click a
+line, type, `Enter` saves, `Esc` cancels, and the tool stays on until `Esc` again. The original
+words are painted over in the page itself, with the background colour around them, and the new
+words are drawn in their place in the document's own font, size and colour, on the same baseline,
+squeezed into the original width when longer.
+The text layer that page readers see holds the new words. Undo one edit with **Revert** in the
+editor, or all of them with **Revert edits** in the edit toolbar. Edits last until you close the
+viewer or open another file; nothing is stored. To keep them, use **Download redacted PDF**: the
+flattened download draws the edits into the page images, so the original words are gone from the
+file. Vector mode is refused while edits exist, because it would keep the original words under
+them. During an AI session the tool and both reverts are refused and edits stay in place.
+
 **Download redacted PDF.** The toolbar button builds a new file, named `<original>-redacted.pdf`.
 By default every page is re-rendered at twice its size, the stickers are painted into the pixels as
 solid black, and the image becomes the whole page. That is a real redaction: the new file has no
@@ -364,6 +389,10 @@ only in content-script memory, in the isolated world, where page scripts cannot 
    in Chrome's viewer. Pages with more than pdf.js's text-span limit, scanned PDFs (no text layer:
    use Draw rectangle) and rotated text are covered less precisely than plain text.
 
+10. Edit text is a display change, not protection. The page's own state, the network and a reload
+   still have the original text, and a copy shown before you edited stays unless you tick **Every
+   copy**. See [docs/LIMITATIONS.md](docs/LIMITATIONS.md#edited-text).
+
 ## Testing
 
 Unit tests run under Vitest:
@@ -388,6 +417,11 @@ development build alone pre-authorises `http://127.0.0.1:4173`, so the tests nev
 prompt; production builds request every origin from the user. To run a second checkout's suite at
 the same time, set `FIXTURES_PORT` (for example `4180`) for both the development build and
 Playwright.
+
+`tests/e2e/edit-text.spec.ts` edits text with the real mouse and keyboard and checks that the page is
+never clicked, that formatting and attributes follow the edit, that re-renders and every undo route
+(including `designMode` and `execCommand('undo')`, with a native control case) never bring the
+original back while locked, and that nothing about an edit reaches storage.
 
 `tests/e2e/pdf.spec.ts` opens `fixtures/sample.pdf` in the viewer, covers the SSN in its text layer
 and a paragraph with a rectangle, downloads the redacted file and checks with pdf.js in Node that it

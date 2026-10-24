@@ -2,12 +2,15 @@
  * Fetching the PDF the user asked to open. The viewer is an extension page,
  * so a cross-origin fetch needs host permission for the PDF's origin (the
  * optional all-sites host permission, granted per origin); `file://` needs the
- * "Allow access to file URLs" switch on chrome://extensions.
+ * "Allow access to file URLs" switch on chrome://extensions plus the manifest's
+ * `file:///*` host permission.
  */
 
 export type LoadError =
   | { kind: 'permission'; origin: string }
   | { kind: 'file-access' }
+  /** File access is on, but the file could not be read (moved, deleted, or not readable). */
+  | { kind: 'file-read' }
   | { kind: 'status'; status: number }
   | { kind: 'network'; message: string };
 
@@ -23,8 +26,9 @@ function readFileUrl(url: string): Promise<ArrayBuffer> {
     const xhr = new XMLHttpRequest();
     xhr.open('GET', url);
     xhr.responseType = 'arraybuffer';
-    xhr.onload = () => (xhr.response ? resolve(xhr.response as ArrayBuffer) : reject(new SourceError({ kind: 'file-access' })));
-    xhr.onerror = () => reject(new SourceError({ kind: 'file-access' }));
+    // Only called once file access is known to be on: a failure here is the file itself.
+    xhr.onload = () => (xhr.response ? resolve(xhr.response as ArrayBuffer) : reject(new SourceError({ kind: 'file-read' })));
+    xhr.onerror = () => reject(new SourceError({ kind: 'file-read' }));
     xhr.send();
   });
 }

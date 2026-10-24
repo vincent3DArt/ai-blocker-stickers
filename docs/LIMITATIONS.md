@@ -391,3 +391,82 @@ exercise them.
     stylesheet lifts itself 1.5 seconds after the first rendered frame,
     which a hidden page can be late to produce (about 2.4 s in headless
     Edge on a busy machine).
+
+## Edited text
+
+**Edit text** rewrites what the page shows. It is a presentation layer for
+demos and for swapping a name before an agent looks, not a sticker.
+
+40. **A reload, the network and page state keep the original.** Edits are
+    held in content-script memory only and are gone on reload; the server's
+    HTML, any `fetch` response, the page's own JavaScript state (a React
+    store, a cached JSON) and `history` still carry the original text. An
+    agent that reloads the tab sees it.
+41. **Copies you did not edit.** Without **Every copy on this page**, other
+    places showing the same text keep it (a toast counts them), and so does
+    text the page renders later, unless it is the edited text itself
+    re-rendered (the same words, whitespace aside). With **Every copy**, any
+    text the page renders later that contains the edited words is edited too.
+    Inside the edited text, every occurrence of the changed words changes.
+    While locked, new text that replaces edited text in the same update and
+    repeats any of its words (3 letters or more) keeps the edit, so "Ms.
+    Zelda Q." cannot show through; a re-render that keeps none of its words
+    ("Loading…") is shown.
+42. **While locked, an edited node keeps the edit even when the page moves
+    on.** A list that recycles an edited row for another record shows the
+    edit in that row until the session ends. Privacy wins over freshness;
+    unlocked, the page's new text replaces the edit.
+43. **Reads in the same task.** A script that writes the original back and
+    reads it in the same synchronous run sees it before the mutation
+    callback rewrites it (as for stickers, see 4). The callback runs before
+    the next paint and before any later task.
+44. **Guess confirmation.** A page script can write a guessed string into
+    the page and watch whether it is rewritten, which confirms the guess.
+45. **Attributes are mirrored on the text's element and four ancestors.**
+    `title`, `aria-label`, `alt` and other attributes that repeat the text
+    there get the edit; one that holds its words in another order is blanked.
+    Link and form targets (`href`, `action`) are never rewritten, `<meta>`
+    tags, JSON in `<script>` and input values are not touched, and the
+    originals stay in content-script memory, readable through CDP like any
+    other isolated-world state.
+46. **Not editable:** text a sticker covers, text inside form fields or
+    `contenteditable` editors (type in them directly), canvas-drawn pages,
+    and text in iframes (the toolbar acts on the top frame). In the PDF viewer,
+    see 49-52.
+    One edit changes one text node, so `Hello <b>Zelda</b> Quarry` takes a
+    click per part.
+47. **Keys typed into the editor and early page listeners.** Keys, focus
+    and composition events aimed at the editor are stopped at the window
+    before the page's document-level handlers run, so focus traps and
+    shortcuts do not see them. A page listener registered on `window` in the
+    capture phase before the tool was turned on still runs first.
+48. **Reverting text under a sticker.** Revert does not rewrite text a
+    sticker currently covers; when that sticker is later deleted, the edited
+    text comes back, not the page's original.
+49. **PDF edits can look patched on.** The new words are drawn in the PDF's
+    own font when pdf.js loaded it, at its size and on its baseline, in the
+    colour of the original ink. Embedded fonts are often subsets: a character
+    the document never used falls back to pdf.js's stand-in family (bold or
+    italic like the original). Fonts pdf.js draws itself (Type3) use the
+    stand-in throughout. The cover is one flat colour sampled around the
+    text, so it shows over images, gradients or watermarks. Longer text is
+    squeezed into the original width; right-to-left text is drawn
+    left-aligned.
+50. **What a PDF edit can reach.** One edit changes one text-layer span (pdf.js
+    often splits a line into several). Rotated text, rotated pages and spans
+    pdf.js did not size (single characters) cannot be edited; cover them with
+    a sticker instead, and "Every copy in this document" skips them without
+    saying so. The cover is the span's box with a little padding, cut short
+    where neighbouring text is closer (tight line spacing): glyph parts beyond
+    it (large accents, swashes, unusual character spacing) can still show at
+    its edges, on screen and in the download. The file name
+    in the viewer's title is never edited.
+51. **PDF edits need the flattened download.** Only the flattened download
+    contains them, drawn into the page images. Vector mode is refused while
+    any edit exists, because the original words would stay in the file under
+    the new ones.
+52. **PDF edits are gone when the viewer closes.** Reopening the file, or
+    opening another one, shows the original text. The source file on the
+    server or the disk, and the viewer's memory while it is open, still hold
+    the original (see 22). A script running in the viewer page can move a
+    span so its cover no longer lines up with the glyphs.
