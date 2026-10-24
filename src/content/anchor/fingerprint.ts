@@ -4,6 +4,7 @@ import { syncHmac, type SyncHmac } from '@/shared/hmac-sync';
 import { buildCssPath, buildXPath, isIdentifierLike, isKeyword, isStableId, stableClasses, testId } from './selector';
 import { headingContext, labelInfo, normalizeContext, tableContext } from './context';
 import { toViewRect, viewToDoc } from './geometry';
+import { editedPageText, pageTextContent } from '../edit/page-text';
 
 /** The HMAC key is set once by the content script boot before any fingerprinting. */
 let hmacKey: CryptoKey | null = null;
@@ -105,8 +106,8 @@ export function setOriginalText(fn: (t: Text) => string | undefined) {
 
 /**
  * Text used for the fingerprint: the value for form controls, otherwise
- * `textContent` as the page wrote it, our bullets swapped back for the
- * originals. A session auto-cover is masked before it is fingerprinted; a hash
+ * `textContent` as the page wrote it, live edits undone and our bullets
+ * swapped back for the originals. A session auto-cover is masked before it is fingerprinted; a hash
  * of its bullets would never match the page again.
  * Labels deliberately stay blind to masks: they are stored as text, and
  * covered text must never reach storage (types.ts).
@@ -115,12 +116,13 @@ export function fingerprintText(el: Element): string {
   if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement) {
     return el.value ?? '';
   }
-  const raw = el.textContent ?? '';
+  // The page's own text: a live edit is gone after reload and must not change identity.
+  const raw = pageTextContent(el);
   // Every text mask writes bullets: text without one holds none of ours.
   if (!raw.includes('•')) return raw;
   const w = el.ownerDocument.createTreeWalker(el, NodeFilter.SHOW_TEXT);
   let s = '';
-  for (let n = w.nextNode(); n; n = w.nextNode()) s += originalOf(n as Text) ?? (n as Text).data;
+  for (let n = w.nextNode(); n; n = w.nextNode()) s += editedPageText(n as Text) ?? originalOf(n as Text) ?? (n as Text).data;
   return s;
 }
 

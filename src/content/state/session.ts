@@ -33,6 +33,7 @@ import { clientRects, clipChain, clipTo, docToView, intersect, isRendered, toVie
 import type { SiteStore } from './store';
 import { pageLoc, pagePath } from './page-path';
 import { presentViews, viewIdentityOf, viewKey, type ViewOptions } from './view';
+import { editedPageText } from '../edit/page-text';
 
 interface Runtime {
   sticker: Sticker;
@@ -464,7 +465,7 @@ export class Session {
   }
 
   private viewOptions(): ViewOptions {
-    return { isOurs: (n) => this.o.isOurs(n), originalOf: (t) => this.o.masker.originalText(t) };
+    return { isOurs: (n) => this.o.isOurs(n), originalOf: (t) => editedPageText(t) ?? this.o.masker.originalText(t) };
   }
 
   /** Viewers open now, hashed at the lengths the URL's view stickers need. */

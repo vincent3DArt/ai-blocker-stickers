@@ -31,6 +31,8 @@ export interface TestState {
   };
   /** Strict input masking: whether it applies in this tab, and how many fields it holds. */
   strict?: { on: boolean; count: number };
+  /** Live text edits: how many, how many nodes show one, and the Edit text tool (null when off). */
+  edits?: { count: number; nodes: number; tool: { open: boolean } | null };
   /** Auto-suggest scanner. */
   scan?: {
     active: boolean;
