@@ -769,6 +769,31 @@ test.describe('red team: peek abuse', () => {
   });
 });
 
+const BULLETS = '•'.repeat(11);
+
+/** Channel 15 under strict masking: every page-world read, plus every field's live value. */
+async function strictReads(page: Page): Promise<Record<string, string>> {
+  const r = await mainWorldReads(page);
+  r.values = await page.evaluate(() =>
+    Array.from(document.querySelectorAll('input,textarea')).map((i) => (i as HTMLInputElement).value).join('|'),
+  );
+  r.inputValue = await page.locator('#ssn').inputValue();
+  return r;
+}
+
+const formSsn = (page: Page) => page.evaluate(() => new FormData(document.getElementById('intake') as HTMLFormElement).get('ssn'));
+
+/** An extension page to send popup-only messages from (TEST_SESSION). */
+async function controlPage(ext: Ext): Promise<Page> {
+  const p = await ext.context.newPage();
+  await p.goto(`chrome-extension://${new URL(ext.worker.url()).host}/popup.html`);
+  return p;
+}
+
+async function testSession(ctl: Page, active: boolean) {
+  expect(await ctl.evaluate((a) => chrome.runtime.sendMessage({ type: 'TEST_SESSION', active: a }), active)).toMatchObject({ ok: true });
+}
+
 test.describe('red team: input value (documented residual)', () => {
   test('15 non-strict: .value / FormData readable as documented; selection, copy and AX are not', async ({ page, ext }) => {
     await ext.context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: ORIGIN });
@@ -805,27 +830,62 @@ test.describe('red team: input value (documented residual)', () => {
     cleanAll(await mainWorldReads(page));
   });
 
-  test('15 strict: .value reads bullets for every reader, FormData and reset keep the real value', async ({ page, ext }) => {
+  test('15 strict, locked: .value, FormData and requestSubmit() read bullets; a real submission sends the real value', async ({ page, ext }) => {
+    await setupForms(page, ext);
+    const ctl = await controlPage(ext);
+    await testSession(ctl, true);
+    // Default 'locked' setting: the lock turns strict masking on.
+    await expect.poll(async () => (await ext.state(page)).strict?.count, { timeout: 3000 }).toBe(1);
+    cleanAll(await strictReads(page));
+    cleanAll(await axReads(page));
+    expect(await formSsn(page)).toBe(BULLETS);
+    // requestSubmit(): a handler reading .value, and the page's own handler (FormData, then cancel), get bullets.
+    const viaSubmit = await page.evaluate(() => {
+      const form = document.getElementById('intake') as HTMLFormElement;
+      let during = '';
+      form.addEventListener('submit', () => (during = (document.getElementById('ssn') as HTMLInputElement).value), { once: true });
+      form.requestSubmit();
+      return { during, handler: (window as unknown as { __submitted: Record<string, string> }).__submitted.ssn };
+    });
+    expect(viaSubmit).toEqual({ during: BULLETS, handler: BULLETS });
+    expect(await formSsn(page)).toBe(BULLETS);
+    // A form reset goes back to the page's own default, which is then masked again.
+    await page.evaluate(() => (document.getElementById('intake') as HTMLFormElement).reset());
+    await expect.poll(() => page.locator('#ssn').inputValue(), { timeout: 2000 }).toBe(BULLETS);
+    expect(await formSsn(page)).toBe(BULLETS);
+    cleanAll(await strictReads(page));
+    // A real submission (a trusted click, not cancelled) still sends the real value.
+    // The fixture's own submit handler cancels; keep it out of this one.
+    await page.evaluate(() => window.addEventListener('submit', (e) => e.stopImmediatePropagation(), true));
+    const sent = page.waitForRequest((r) => r.url().includes('ssn='));
+    await page.click('#intake button[type=submit]');
+    expect(new URL((await sent).url()).searchParams.get('ssn')).toBe('123-45-6789');
+    await testSession(ctl, false);
+    await ctl.close();
+  });
+
+  test("15 strict, unlocked ('always'): FormData, submit handlers and reset keep the real value", async ({ page, ext }) => {
     await ext.worker.evaluate(() => chrome.storage.local.set({ settings: { strictInputs: 'always' } }));
     await setupForms(page, ext);
     await expect.poll(async () => (await ext.state(page)).strict?.count).toBe(1);
-    const reads = async () => {
-      const r = await mainWorldReads(page);
-      r.values = await page.evaluate(() =>
-        Array.from(document.querySelectorAll('input,textarea')).map((i) => (i as HTMLInputElement).value).join('|'),
-      );
-      r.inputValue = await page.locator('#ssn').inputValue();
-      return r;
-    };
-    cleanAll(await reads());
+    expect((await ext.state(page)).lock?.locked).toBe(false);
+    cleanAll(await strictReads(page));
     cleanAll(await axReads(page));
-    const formSsn = () => page.evaluate(() => new FormData(document.getElementById('intake') as HTMLFormElement).get('ssn'));
-    expect(await formSsn()).toBe('123-45-6789');
+    expect(await formSsn(page)).toBe('123-45-6789');
+    const viaSubmit = await page.evaluate(() => {
+      const form = document.getElementById('intake') as HTMLFormElement;
+      let during = '';
+      form.addEventListener('submit', () => (during = (document.getElementById('ssn') as HTMLInputElement).value), { once: true });
+      form.requestSubmit();
+      return { during, handler: (window as unknown as { __submitted: Record<string, string> }).__submitted.ssn };
+    });
+    expect(viaSubmit).toEqual({ during: '123-45-6789', handler: '123-45-6789' });
+    expect(await page.locator('#ssn').inputValue()).toBe(BULLETS);
     // A form reset goes back to the page's own default, which is then masked again.
     await page.evaluate(() => (document.getElementById('intake') as HTMLFormElement).reset());
-    await expect.poll(() => page.locator('#ssn').inputValue(), { timeout: 2000 }).toBe('•'.repeat(11));
-    expect(await formSsn()).toBe('123-45-6789');
-    cleanAll(await reads());
+    await expect.poll(() => page.locator('#ssn').inputValue(), { timeout: 2000 }).toBe(BULLETS);
+    expect(await formSsn(page)).toBe('123-45-6789');
+    cleanAll(await strictReads(page));
   });
 });
 

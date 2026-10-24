@@ -2,6 +2,7 @@
 // Checks the production build for development-only code: test message names,
 // the storage switches that turn auto-lock or scanning off, the fixture
 // origins, the hidden-tab emulation and the popup demo mode. Builds nothing: run `pnpm build` first.
+// Also fails if manifest.json lists a permission Chrome refuses as optional.
 //
 // Exits 1 and prints file: identifier x count for every hit. No dependencies.
 
@@ -53,6 +54,18 @@ try {
 }
 
 let hits = 0;
+
+// Chromium marks these kFlagCannotBeOptional (chrome_api_permissions.cc). Chrome
+// drops them from optional_permissions at install, with only a console warning.
+const NOT_OPTIONAL = ['debugger', 'declarativeNetRequest', 'devtools', 'experimental', 'geolocation', 'mdns', 'proxy', 'tts', 'ttsEngine', 'wallpaper'];
+const manifest = JSON.parse(readFileSync(join(OUT, 'manifest.json'), 'utf8'));
+for (const p of manifest.optional_permissions ?? []) {
+  if (NOT_OPTIONAL.includes(p)) {
+    console.error(`manifest.json: optional_permissions lists '${p}', which Chrome drops (it cannot be optional)`);
+    hits++;
+  }
+}
+
 for (const file of files) {
   const text = readFileSync(file, 'utf8');
   for (const id of DENY) {
@@ -65,7 +78,7 @@ for (const file of files) {
 }
 
 if (hits) {
-  console.error(`\ncheck-prod-bundle: ${hits} development-only identifier(s) in the production build.`);
+  console.error(`\ncheck-prod-bundle: ${hits} problem(s) in the production build.`);
   process.exit(1);
 }
 console.log(`check-prod-bundle: ${files.length} files clean (${DENY.length} identifiers checked).`);

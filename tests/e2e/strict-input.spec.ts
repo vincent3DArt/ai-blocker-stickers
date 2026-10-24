@@ -136,7 +136,8 @@ test.describe('strict input masking', () => {
     await expect.poll(async () => (await ext.state(page)).lock?.locked, { timeout: 3000 }).toBe(true);
     await expect.poll(async () => (await ext.state(page)).strict).toEqual({ on: true, count: 1 });
     expect(await page.locator('#ssn').inputValue()).toBe(BULLETS);
-    expect(await formValue(page, 'ssn')).toBe(SSN);
+    // Locked: a FormData built outside a real submission gets bullets too.
+    expect(await formValue(page, 'ssn')).toBe(BULLETS);
 
     // Weakening the setting while locked is deferred until the lock ends.
     await setStrict(ext, 'never');

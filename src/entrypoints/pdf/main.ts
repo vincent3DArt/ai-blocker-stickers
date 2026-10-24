@@ -593,6 +593,10 @@ function explain(e: unknown, src: string) {
       status('To open files from this computer by link, turn on "Allow access to file URLs" for AI Blocker Stickers in chrome://extensions, or use Open file….', true);
       return;
     }
+    if (info.kind === 'file-read') {
+      status('Could not read this file from your computer. It may have been moved or deleted. Use Open file… to pick it.', true);
+      return;
+    }
     if (info.kind === 'status') {
       status(`The server answered ${info.status}.`, true);
       return;

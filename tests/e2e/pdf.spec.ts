@@ -5,7 +5,7 @@
  */
 import type { Page } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { test, expect, boxOf, coverage, lockTab, ORIGIN, type Ext } from './fixtures';
 
 const SSN = '123-45-6789';
@@ -341,6 +341,20 @@ test.describe('PDF viewer', () => {
     expect((await ext.state(page)).edits?.count).toBe(0);
   });
 
+  test('a local PDF opened by link opens (file access on); a missing one is explained', async ({ page, ext }) => {
+    // "Allow access to file URLs" is on by default for an unpacked extension. Switching it in a test
+    // leaves a command-line-loaded extension disabled, so the switch-off message is unit-tested.
+    const id = new URL(ext.worker.url()).host;
+    const local = (name: string) => `chrome-extension://${id}/pdf.html?src=${encodeURIComponent(pathToFileURL(fileURLToPath(new URL(`../../fixtures/${name}`, import.meta.url))).href)}`;
+    await page.goto(local('sample.pdf'));
+    await waitReady(page);
+    await expect(page.locator('#status')).toContainText('2 pages');
+
+    await page.goto(local('no-such-file.pdf'));
+    await expect(page.locator('body')).toHaveAttribute('data-state', 'error');
+    await expect(page.locator('#status')).toContainText('Could not read this file');
+  });
+
   test('vector mode keeps the text: labelled as not a redaction', async ({ page, ext }) => {
     await openViewer(page, ext, 'sample.pdf');
     await ext.cover(page, await ssnSelector(page));
@@ -416,8 +430,10 @@ test.describe('PDF viewer', () => {
     const viewer = await ext.context.newPage();
     await openViewer(viewer, ext, 'sample.pdf');
     await ext.cover(viewer, await ssnSelector(viewer));
-    const stored = await ext.worker.evaluate(async (key) => JSON.stringify((await chrome.storage.local.get(key))[key] ?? null), `site:chrome-extension://${id}`);
-    expect(stored).toContain('/pdf/');
+    // The store writes on the next tick: wait for it rather than racing it.
+    const read = () => ext.worker.evaluate(async (key) => JSON.stringify((await chrome.storage.local.get(key))[key] ?? null), `site:chrome-extension://${id}`);
+    await expect.poll(read).toContain('/pdf/');
+    const stored = await read();
     expect(stored).not.toContain(SSN);
     expect(stored).not.toContain('sample');
     expect(stored).not.toContain('127.0.0.1');

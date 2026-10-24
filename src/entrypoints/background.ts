@@ -118,7 +118,6 @@ async function hasOriginPermission(origin: string): Promise<boolean> {
 }
 
 const hasAllSites = () => chrome.permissions.contains({ origins: [ALL_SITES] }).catch(() => false);
-const hasDebugger = () => chrome.permissions.contains({ permissions: ['debugger'] }).catch(() => false);
 
 /**
  * Register every enabled site we still have permission for, and unregister
@@ -251,15 +250,14 @@ let polling = false;
 
 /**
  * Lock every tab a debugger is attached to. CDP-driven agents (Claude in
- * Chrome, Playwright, Puppeteer) attach one; so does DevTools. Only
- * available once the optional `debugger` permission is granted.
+ * Chrome, Playwright, Puppeteer) attach one; so does DevTools.
  */
 async function poll(): Promise<void> {
   if (polling) return;
   polling = true;
   try {
     await ready;
-    if (!chrome.debugger?.getTargets || !(await hasDebugger())) return;
+    if (!chrome.debugger?.getTargets) return;
     const targets = await chrome.debugger.getTargets();
     const attached = new Set<number>();
     if (!lock.noAutoLock) {
@@ -296,7 +294,7 @@ async function poll(): Promise<void> {
  */
 async function ensurePolling(): Promise<void> {
   await ready;
-  const need = (lock.stickerTabs.size > 0 || lock.debuggerTabs.size > 0) && !!chrome.debugger && (await hasDebugger());
+  const need = (lock.stickerTabs.size > 0 || lock.debuggerTabs.size > 0) && !!chrome.debugger;
   if (need) {
     if (!pollTimer) {
       pollTimer = setInterval(() => void poll(), POLL_MS);
@@ -352,7 +350,6 @@ async function sessionInfo(): Promise<SessionInfo> {
     startedAt: lock.startedAt || undefined,
     keepAllSites: keep,
     allSitesGranted: await hasAllSites(),
-    debuggerGranted: await hasDebugger(),
   };
 }
 
@@ -483,10 +480,6 @@ export default defineBackground(() => {
   void ensurePolling();
   chrome.alarms.onAlarm.addListener((a) => {
     if (a.name === POLL_ALARM) void poll();
-  });
-
-  chrome.permissions.onAdded.addListener((perm) => {
-    if (perm.permissions?.includes('debugger')) void ensurePolling();
   });
 
   chrome.permissions.onRemoved.addListener(async (perm) => {

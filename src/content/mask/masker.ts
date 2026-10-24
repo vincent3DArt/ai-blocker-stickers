@@ -257,6 +257,11 @@ export class Masker {
     }
   }
 
+  /** While locked, strict fields give their real value only to a real form submission (see strict-input.ts). */
+  setLocked(on: boolean) {
+    this.strict.locked = on;
+  }
+
   get isStrict(): boolean {
     return this.strictOn;
   }
