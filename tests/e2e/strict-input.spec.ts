@@ -159,4 +159,42 @@ test.describe('strict input masking', () => {
     await expect.poll(() => page.locator('#ssn').inputValue(), { timeout: 3000 }).toBe(SSN);
     await ctl.close();
   });
+
+  test('(d) a kept session auto-cover on a strict field fingerprints the real value, not the bullets', async ({ page, ext }) => {
+    await ext.worker.evaluate(() => chrome.storage.local.remove('aibsNoScan'));
+    // No id, name or label: the field's value is its only identity, so a hash
+    // of the bullets cannot be rescued by anything else.
+    await page.route('**/forms.html', async (route) => {
+      const res = await route.fetch();
+      const html = (await res.text()).replace(/<label for="ssn">.*?<\/label><input id="ssn"[^>]*>/, `<input value="${SSN}">`);
+      await route.fulfill({ response: res, body: html });
+    });
+    await openForms(page);
+    // The SSN is the only detection left on the page.
+    await page.evaluate(() => ['acct', 'notes', 'editor', 'ctrl'].forEach((id) => document.getElementById(id)!.closest('.field')!.remove()));
+    expect(await page.locator('#ssn, label[for="ssn"]').count()).toBe(0);
+    const field = page.locator('#intake input').first();
+
+    const ctl = await controlPage(ext);
+    await testSession(ctl, true);
+    await expect.poll(async () => (await ext.state(page)).scan?.autoCount ?? 0, { timeout: 10_000 }).toBe(1);
+    // Strict was on before the scanner covered the field.
+    expect(await field.inputValue()).toBe(BULLETS);
+    await testSession(ctl, false);
+    await ctl.close();
+
+    const stored = () =>
+      ext.worker.evaluate(async () =>
+        Object.entries(await chrome.storage.local.get(null))
+          .filter(([k]) => k.startsWith('site:'))
+          .flatMap(([, v]) => (v as { stickers?: { source: string }[] }).stickers ?? []),
+      );
+    await expect.poll(async () => (await stored()).map((s) => s.source), { timeout: 5000 }).toEqual(['session-auto']);
+    expect(JSON.stringify(await stored())).not.toContain(SSN);
+
+    await page.reload();
+    await expect.poll(async () => (await ext.state(page).catch(() => undefined))?.stickers.map((s) => s.status), { timeout: 5000 }).toEqual(['resolved']);
+    expect(await field.getAttribute('data-aibs-mask')).toBe('input');
+    expect(await field.evaluate((el) => getComputedStyle(el).getPropertyValue('-webkit-text-security').trim())).toBe('disc');
+  });
 });

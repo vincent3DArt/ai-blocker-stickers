@@ -36,7 +36,7 @@ import { Peek, type PeekTarget } from './overlay/peek';
 import { InPageCovers } from './overlay/in-page-cover';
 import { MutationHub } from './mask/guard';
 import { Masker } from './mask/masker';
-import { setFingerprintKey, setOriginalText } from './anchor/fingerprint';
+import { setFingerprintKey, setOriginalText, setRealValue } from './anchor/fingerprint';
 import { SiteStore } from './state/store';
 import { Session } from './state/session';
 import { SpaNav } from './state/spa-nav';
@@ -266,6 +266,7 @@ export async function boot(opts: BootOptions = {}): Promise<BootApi | undefined>
   setPageTextSource({ active: () => edits.managing, text: (t) => edits.pageText(t) });
   masker.start();
   setOriginalText((t) => masker.originalText(t));
+  setRealValue((el) => masker.realValue(el));
 
   let tabState: TabState = { ...DEFAULT_TAB_STATE };
   let scanner: Scanner | undefined;

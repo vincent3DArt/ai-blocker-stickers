@@ -104,8 +104,14 @@ export function setOriginalText(fn: (t: Text) => string | undefined) {
   originalOf = fn;
 }
 
+/** The real value of a field strict mode holds bullets in (Masker.realValue); set once at boot. */
+let realOf: (el: Element) => string | undefined = () => undefined;
+export function setRealValue(fn: (el: Element) => string | undefined) {
+  realOf = fn;
+}
+
 /**
- * Text used for the fingerprint: the value for form controls, otherwise
+ * Text used for the fingerprint: the real value for form controls, otherwise
  * `textContent` as the page wrote it, live edits undone and our bullets
  * swapped back for the originals. A session auto-cover is masked before it is fingerprinted; a hash
  * of its bullets would never match the page again.
@@ -114,7 +120,7 @@ export function setOriginalText(fn: (t: Text) => string | undefined) {
  */
 export function fingerprintText(el: Element): string {
   if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement) {
-    return el.value ?? '';
+    return realOf(el) ?? el.value ?? '';
   }
   // The page's own text: a live edit is gone after reload and must not change identity.
   const raw = pageTextContent(el);
