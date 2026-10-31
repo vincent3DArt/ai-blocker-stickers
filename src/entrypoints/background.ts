@@ -3,6 +3,7 @@ import { listSites, loadSettings, loadSite, saveSite, siteKey } from '@/shared/s
 import { DEFAULT_TAB_STATE, type SiteRecord, type TabState } from '@/shared/types';
 import { parseOrigin, scriptId } from '@/shared/origin';
 import { AUDIT_KEY, SESSION_ACTIVE_KEY, appendAudit, computeLock, type AuditEntry } from '@/shared/lock';
+import { UPDATE_ALARM, UPDATE_KEY, UPDATE_PERIOD_MIN, availableUpdate, fetchLatestRelease, readUpdateInfo } from '@/shared/update';
 
 const CONTENT_SCRIPT = 'content-scripts/content.js';
 const CLOAK_CSS = 'cloak.css';
@@ -421,8 +422,61 @@ async function paintBadge(tabId: number, state: TabState) {
   } else if (state.editMode) {
     color = '#2563eb';
   }
+  if (!text && updateVersion) {
+    text = UPDATE_BADGE;
+    color = UPDATE_COLOR;
+  }
   await chrome.action.setBadgeText({ tabId, text });
   await chrome.action.setBadgeBackgroundColor({ tabId, color });
+}
+
+// ---- update notice (shared/update.ts) ----
+
+const UPDATE_BADGE = '\u2191';
+const UPDATE_COLOR = '#15803d';
+/** Skip a check when the last one is this recent (the alarm fires daily; settings changes call it too). */
+const UPDATE_MIN_GAP_MS = 20 * 60 * 60 * 1000;
+/** Newer release version, when the setting is on. A tab's own badge wins; this fills an empty one. */
+let updateVersion: string | null = null;
+
+async function loadUpdateInfo() {
+  const res = await chrome.storage.local.get(UPDATE_KEY);
+  return readUpdateInfo(res[UPDATE_KEY]);
+}
+
+/** Development builds never call out: the e2e suite runs offline and dev versions don't track releases. */
+async function scheduleUpdateCheck(): Promise<void> {
+  if (import.meta.env.DEV) return;
+  if (!(await chrome.alarms.get(UPDATE_ALARM))) {
+    await chrome.alarms.create(UPDATE_ALARM, { delayInMinutes: 1, periodInMinutes: UPDATE_PERIOD_MIN });
+  }
+}
+
+async function checkForUpdates(): Promise<void> {
+  if (import.meta.env.DEV) return;
+  if (!(await loadSettings()).checkUpdates) return;
+  const last = await loadUpdateInfo();
+  if (last && Date.now() - last.checkedAt < UPDATE_MIN_GAP_MS) return;
+  try {
+    await chrome.storage.local.set({ [UPDATE_KEY]: await fetchLatestRelease() });
+  } catch (e) {
+    // Offline or rate-limited: keep the previous result and try at the next alarm.
+    console.warn('[aibs] update check failed', (e as Error).message);
+  }
+}
+
+/** Recomputes `updateVersion` and repaints every tab's badge when it changes. */
+async function refreshUpdateBadge(): Promise<void> {
+  const next = (await loadSettings()).checkUpdates ? availableUpdate(await loadUpdateInfo(), chrome.runtime.getManifest().version) : null;
+  if (next === updateVersion) return;
+  updateVersion = next;
+  const name = chrome.runtime.getManifest().name;
+  await chrome.action.setBadgeText({ text: next ? UPDATE_BADGE : '' });
+  await chrome.action.setBadgeBackgroundColor({ color: UPDATE_COLOR });
+  await chrome.action.setTitle({ title: next ? `${name}: version ${next} is available` : name });
+  for (const t of await chrome.tabs.query({})) {
+    if (t.id !== undefined) void paintBadgeFor(t.id).catch(() => {});
+  }
 }
 
 export async function getTabState(tabId: number): Promise<TabState> {
@@ -517,8 +571,11 @@ export default defineBackground(() => {
   // Every service-worker start: resume polling if a sticker tab or a lock survived.
   void ensurePolling();
   void forgetPdfStickers();
+  void scheduleUpdateCheck();
+  void refreshUpdateBadge().catch(() => {});
   chrome.alarms.onAlarm.addListener((a) => {
     if (a.name === POLL_ALARM) void poll();
+    if (a.name === UPDATE_ALARM) void checkForUpdates();
   });
 
   chrome.permissions.onRemoved.addListener(async (perm) => {
@@ -536,6 +593,9 @@ export default defineBackground(() => {
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area !== 'local') return;
     if (changes.settings || changes[siteKey(viewerOrigin())]) void forgetPdfStickers();
+    if (changes.settings || changes[UPDATE_KEY]) void refreshUpdateBadge().catch(() => {});
+    // Turning the check back on: look now rather than at the next daily alarm.
+    if (changes.settings && (changes.settings.newValue as { checkUpdates?: boolean } | undefined)?.checkUpdates !== false) void checkForUpdates();
     if (changes.settings) {
       const had = globalDetectors;
       void loadGlobalDetectors().then(() => {
