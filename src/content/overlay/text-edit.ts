@@ -1,4 +1,5 @@
 import type { OverlayHost } from './host';
+import { wheelThrough } from './wheel-through';
 import type { ViewRect } from '@/shared/types';
 import { union } from '../anchor/geometry';
 import { shadowRootOf } from '../mask/text-mask';
@@ -82,6 +83,7 @@ export class TextEditTool {
       this.disposers.push(() => window.removeEventListener(type, fn, opts));
     };
     this.capture.addEventListener('mousemove', (e) => this.onHover(e.clientX, e.clientY));
+    this.disposers.push(wheelThrough(this.capture, this.isOurs));
     this.capture.addEventListener('mousedown', (e) => e.preventDefault());
     this.capture.addEventListener('click', (e) => {
       e.preventDefault();
