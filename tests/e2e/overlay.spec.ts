@@ -53,6 +53,26 @@ test.describe('M1 overlay + placement', () => {
     for (const s of (await ext.state(page)).stickers) expect(s.status).toBe('resolved');
   });
 
+  test('the wheel still scrolls the page and inner scrollers while a tool is on', async ({ page, ext }) => {
+    await page.goto('/static.html');
+    await page.evaluate(() => document.getElementById('scroller')!.scrollIntoView({ block: 'center' }));
+    for (const type of ['START_RECT', 'START_PICK', 'START_EDIT_TEXT'] as const) {
+      await page.evaluate(() => (document.getElementById('scroller')!.scrollTop = 0));
+      await ext.send(page, { type });
+      const b = await boxOf(page, '#scroller');
+      await page.mouse.move(b.x + b.w / 2, b.y + b.h / 2);
+      await page.mouse.wheel(0, 120);
+      await expect.poll(() => page.evaluate(() => document.getElementById('scroller')!.scrollTop), { message: type }).toBeGreaterThan(0);
+      await page.keyboard.press('Escape');
+    }
+    // Outside any inner scroller the document scrolls as usual.
+    await page.evaluate(() => window.scrollTo(0, 0));
+    await ext.send(page, { type: 'START_RECT' });
+    await page.mouse.move(20, 20);
+    await page.mouse.wheel(0, 200);
+    await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(0);
+  });
+
   test('follows window scroll and resize', async ({ page, ext }) => {
     await page.goto('/static.html');
     await ext.cover(page, '#bottom-account');

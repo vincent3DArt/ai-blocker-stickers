@@ -1,4 +1,5 @@
 import type { OverlayHost } from './host';
+import { wheelThrough } from './wheel-through';
 import { clientRects, union } from '../anchor/geometry';
 
 export interface PickerCallbacks {
@@ -47,6 +48,7 @@ export class Picker {
       }
     };
     this.capture.addEventListener('mousemove', onMove);
+    this.disposers.push(wheelThrough(this.capture, this.isOurs));
     this.capture.addEventListener('click', (e) => {
       e.preventDefault();
       e.stopPropagation();

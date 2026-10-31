@@ -1,5 +1,6 @@
 import type { ViewRect } from '@/shared/types';
 import type { OverlayHost } from './host';
+import { wheelThrough } from './wheel-through';
 
 export interface RectDrawCallbacks {
   onDraw(rect: ViewRect): void;
@@ -12,6 +13,7 @@ export class RectDraw {
   private box: HTMLDivElement;
   private tag: HTMLSpanElement;
   private start: { x: number; y: number } | null = null;
+  private stopWheel: (() => void) | null = null;
   private onKey = (e: KeyboardEvent) => {
     if (e.key === 'Escape') {
       e.preventDefault();
@@ -54,10 +56,13 @@ export class RectDraw {
       this.cb.onDraw(r);
     });
     window.addEventListener('keydown', this.onKey, true);
+    this.stopWheel = wheelThrough(this.capture, (n) => this.host.isOurs(n));
   }
 
   end() {
     window.removeEventListener('keydown', this.onKey, true);
+    this.stopWheel?.();
+    this.stopWheel = null;
     this.capture.remove();
     this.box.remove();
     this.start = null;
