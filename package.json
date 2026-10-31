@@ -8,7 +8,7 @@
     "type": "git",
     "url": "git+https://github.com/vincent3DArt/ai-blocker-stickers.git"
   },
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "scripts": {
     "dev": "wxt",
