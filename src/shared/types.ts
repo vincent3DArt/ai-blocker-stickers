@@ -393,6 +393,8 @@ export interface Settings {
    * saved ones once no viewer is locked.
    */
   rememberPdfStickers: boolean;
+  /** Ask GitHub once a day whether a newer release exists (shared/update.ts). */
+  checkUpdates: boolean;
 }
 
 export type StrictInputsMode = 'locked' | 'always' | 'never';
@@ -415,6 +417,7 @@ export const DEFAULT_SETTINGS: Settings = {
   scanDefault: true,
   rememberPdfStickers: true,
   scanSensitivity: 'balanced',
+  checkUpdates: true,
 };
 
 /** Fill in defaults and drop unknown values from a stored (possibly partial or stale) settings object. */
@@ -430,6 +433,7 @@ export function normalizeSettings(s: Partial<Settings> | undefined | null): Sett
       : DEFAULT_SETTINGS.strictInputs,
     scanDefault: typeof src.scanDefault === 'boolean' ? src.scanDefault : DEFAULT_SETTINGS.scanDefault,
     rememberPdfStickers: typeof src.rememberPdfStickers === 'boolean' ? src.rememberPdfStickers : DEFAULT_SETTINGS.rememberPdfStickers,
+    checkUpdates: typeof src.checkUpdates === 'boolean' ? src.checkUpdates : DEFAULT_SETTINGS.checkUpdates,
     scanSensitivity: SCAN_SENSITIVITIES.includes(src.scanSensitivity as ScanSensitivity)
       ? (src.scanSensitivity as ScanSensitivity)
       : DEFAULT_SETTINGS.scanSensitivity,

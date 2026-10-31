@@ -111,6 +111,28 @@ For a live-reloading dev loop:
 pnpm dev
 ```
 
+## Updates
+
+Chrome never updates an unpacked extension by itself. Instead, a production build asks GitHub once
+a day for the latest release (an anonymous request for public release data; nothing about you or
+your pages is sent). When a newer version exists, the toolbar icon shows a green `↑` on tabs with no
+other badge, and the popup links to the release. To stop the check, turn off **Check GitHub for new
+versions daily** under Settings. Development builds never check.
+
+To update, download the zip from the release, unzip it over the folder you loaded before, and click
+reload on `chrome://extensions`. Use the same folder: Chrome treats a different folder as a different
+extension, and your stickers and settings stay with the old one.
+
+To publish a release, bump `version` in `package.json`, commit, then tag and push:
+
+```
+git tag v0.2.0
+git push origin v0.2.0
+```
+
+The Release workflow checks that the tag matches the version, runs the checks, builds with
+`pnpm zip`, and attaches the zip to a new GitHub release.
+
 ## Usage
 
 **Enable a site.** Open the popup and click "Enable on this site". The extension asks for host

@@ -1,0 +1,53 @@
+name: Release
+
+# Push a tag matching package.json's version (`git tag v0.2.0 && git push origin v0.2.0`).
+# Builds and checks the extension, then publishes a GitHub release with the zip
+# attached. Installed copies see it within a day (src/shared/update.ts).
+
+on:
+  push:
+    tags: ['v*.*.*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Tag matches package.json version
+        run: |
+          want="v$(node -p "require('./package.json').version")"
+          if [ "$GITHUB_REF_NAME" != "$want" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match package.json version ($want). Bump the version first."
+            exit 1
+          fi
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm compile
+      - run: pnpm test
+      - run: pnpm scan
+      - run: pnpm zip
+      - run: pnpm check:prod
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat > notes.md <<'EOF'
+          ## Updating an unpacked install
+
+          1. Download the zip below.
+          2. Unzip it **over the same folder** you loaded before, replacing its files. A different folder
+             is a different extension to Chrome, and your stickers and settings stay with the old one.
+          3. Open `chrome://extensions` and click the reload icon on AI Blocker Stickers.
+
+          EOF
+          gh release create "$GITHUB_REF_NAME" .output/*-chrome.zip \
+            --title "$GITHUB_REF_NAME" --notes-file notes.md --generate-notes --verify-tag

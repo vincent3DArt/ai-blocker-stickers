@@ -8,6 +8,7 @@ import { normalizeLabelWords } from '@/content/detect/derive';
 import { defaultPathPattern, prefixPathPattern, sanitizePathPattern } from '@/shared/url-match';
 import { AUDIT_KEY, isAuditEntry, lockMessage, type AuditEntry } from '@/shared/lock';
 import { icon, type IconName } from '@/shared/icons';
+import { UPDATE_KEY, availableUpdate, readUpdateInfo, releaseUrl } from '@/shared/update';
 
 const app = document.querySelector<HTMLDivElement>('#app')!;
 const README_URL = 'https://github.com/vincent3DArt/ai-blocker-stickers#usage';
@@ -316,7 +317,37 @@ function settingsSection(settings: Settings, locked: boolean, origin: string | n
       await saveSettings({ ...cur, scanSensitivity: v });
     }),
   );
-  return disclosure('settings', 'settings', 'Settings', box, scan, detectorsFieldset(settings, origin, site, invalid, locked), pdfSettingsFieldset(settings, locked));
+  const updates = h('fieldset', { disabled: locked, title: lockedTitle });
+  updates.append(
+    h('legend', {}, 'Updates'),
+    toggle(
+      h('input', {
+        id: 'check-updates',
+        checked: settings.checkUpdates,
+        onchange: async (e: Event) => {
+          const cur = await loadSettings();
+          await saveSettings({ ...cur, checkUpdates: (e.target as HTMLInputElement).checked });
+        },
+      }),
+      'Check GitHub for new versions daily',
+    ),
+  );
+  return disclosure('settings', 'settings', 'Settings', box, scan, detectorsFieldset(settings, origin, site, invalid, locked), pdfSettingsFieldset(settings, locked), updates);
+}
+
+/** A newer GitHub release than this install, from the background's daily check; null when current or switched off. */
+async function pendingUpdate(settings: Settings): Promise<string | null> {
+  if (!settings.checkUpdates) return null;
+  const res = await chrome.storage.local.get(UPDATE_KEY).catch(() => ({}) as Record<string, unknown>);
+  return availableUpdate(readUpdateInfo(res[UPDATE_KEY]), chrome.runtime.getManifest().version);
+}
+
+function updateNotice(version: string): HTMLElement {
+  return notice(
+    'info',
+    [document.createTextNode(`Version ${version} is available (you have ${chrome.runtime.getManifest().version}). `), h('a', { href: releaseUrl(version), target: '_blank', rel: 'noopener' }, 'Get it on GitHub')],
+    { id: 'update-notice' },
+  );
 }
 
 const CANVAS_NOTE =
@@ -688,9 +719,10 @@ async function render() {
   const session = await getSession();
   const audit = await auditSection();
   const settings = await loadSettings();
+  const update = await pendingUpdate(settings);
   const head = header(origin);
   const view = document.createDocumentFragment();
-  view.append(head.el, pdfOpenSection(tab));
+  view.append(head.el, update ? updateNotice(update) : '', pdfOpenSection(tab));
   let tabLocked = false;
   let autoCount = 0;
   let invalid: ReadonlySet<string> = new Set();
